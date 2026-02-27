@@ -1,0 +1,187 @@
+import { NextResponse } from "next/server";
+import { getServerSupabase } from "@/lib/supabase";
+import { runResearchPipeline } from "@/agents/orchestrator";
+import { OrchestratorInput } from "@/types/research";
+
+export const maxDuration = 300; // 5 minutes for Vercel
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const { eventId, layer = "baseline" } = body;
+
+    if (!eventId) {
+      return NextResponse.json({ error: "eventId is required" }, { status: 400 });
+    }
+
+    if (layer !== "baseline" && layer !== "current") {
+      return NextResponse.json({ error: "layer must be 'baseline' or 'current'" }, { status: 400 });
+    }
+
+    const supabase = getServerSupabase();
+
+    // Load event
+    const { data: event, error: eventError } = await supabase
+      .from("events")
+      .select("*")
+      .eq("id", eventId)
+      .single();
+
+    if (eventError || !event) {
+      return NextResponse.json({ error: "Event not found" }, { status: 404 });
+    }
+
+    // Load words
+    const { data: words } = await supabase
+      .from("words")
+      .select("*")
+      .eq("event_id", eventId)
+      .order("word");
+
+    if (!words || words.length === 0) {
+      return NextResponse.json({ error: "No words found for this event" }, { status: 400 });
+    }
+
+    // Load existing baseline research if running current layer
+    let existingResearch: OrchestratorInput["existingResearch"] = undefined;
+    if (layer === "current") {
+      const { data: baselineRun } = await supabase
+        .from("research_runs")
+        .select("*")
+        .eq("event_id", eventId)
+        .eq("layer", "baseline")
+        .eq("status", "completed")
+        .order("completed_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (baselineRun) {
+        existingResearch = {
+          historicalResult: baselineRun.historical_result,
+          agendaResult: baselineRun.agenda_result,
+          eventFormatResult: baselineRun.event_format_result,
+          marketAnalysisResult: baselineRun.market_analysis_result,
+        };
+      }
+    }
+
+    // Create research run row
+    const { data: researchRun, error: runError } = await supabase
+      .from("research_runs")
+      .insert({
+        event_id: eventId,
+        layer,
+        status: "running",
+      })
+      .select()
+      .single();
+
+    if (runError || !researchRun) {
+      return NextResponse.json({ error: `Failed to create research run: ${runError?.message}` }, { status: 500 });
+    }
+
+    // Use SSE to stream progress
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        const sendEvent = (data: unknown) => {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
+          );
+        };
+
+        const orchestratorInput: OrchestratorInput = {
+          event: {
+            id: event.id,
+            kalshiEventTicker: event.kalshi_event_ticker,
+            title: event.title,
+            speaker: event.speaker,
+            eventType: event.event_type ?? "speech",
+            eventDate: event.event_date ?? new Date().toISOString(),
+            venue: event.venue ?? undefined,
+          },
+          words: words.map((w) => ({
+            id: w.id,
+            ticker: w.kalshi_market_ticker,
+            word: w.word,
+            // We'll need to fetch current prices - use 0 as default
+            yesPrice: 0.5,
+            noPrice: 0.5,
+          })),
+          layer,
+          existingResearch,
+        };
+
+        // Try to get current prices from Kalshi
+        try {
+          const { kalshiFetch } = await import("@/lib/kalshi-client");
+          const priceResponse = await kalshiFetch(
+            "GET",
+            `/events/${event.kalshi_event_ticker}`
+          );
+          if (priceResponse.ok) {
+            const priceData = await priceResponse.json();
+            const markets = priceData.markets ?? priceData.event?.markets ?? [];
+            for (const word of orchestratorInput.words) {
+              const market = markets.find(
+                (m: { ticker: string }) => m.ticker === word.ticker
+              );
+              if (market) {
+                word.yesPrice = parseFloat(market.yes_bid_dollars) || 0.5;
+                word.noPrice = parseFloat(market.no_bid_dollars) || 0.5;
+              }
+            }
+          }
+        } catch {
+          // Use default prices if Kalshi fetch fails
+        }
+
+        sendEvent({
+          type: "started",
+          runId: researchRun.id,
+          layer,
+          totalAgents: layer === "current" ? 7 : 6,
+        });
+
+        try {
+          const result = await runResearchPipeline(
+            orchestratorInput,
+            researchRun.id,
+            (progress) => {
+              sendEvent({ type: "progress", ...progress });
+            }
+          );
+
+          sendEvent({
+            type: "completed",
+            runId: researchRun.id,
+            tokenUsage: result.tokenUsage,
+            wordScoresCount: result.wordScores.length,
+            clustersCount: result.clusters.length,
+          });
+        } catch (error) {
+          sendEvent({
+            type: "error",
+            runId: researchRun.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
+    });
+  } catch (err) {
+    return NextResponse.json(
+      { error: (err as Error).message },
+      { status: 500 }
+    );
+  }
+}

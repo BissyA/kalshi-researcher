@@ -1,65 +1,255 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+
+interface LoadedEvent {
+  id: string;
+  kalshi_event_ticker: string;
+  title: string;
+  speaker: string;
+  event_type: string;
+  event_date: string;
+  status: string;
+}
+
+interface LoadedWord {
+  id: string;
+  ticker: string;
+  word: string;
+  yesPrice: number;
+  noPrice: number;
+  lastPrice: number;
+  volume: string;
+}
+
+interface PreviousEvent {
+  id: string;
+  title: string;
+  speaker: string;
+  event_date: string;
+  status: string;
+}
+
+export default function HomePage() {
+  const router = useRouter();
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [event, setEvent] = useState<LoadedEvent | null>(null);
+  const [words, setWords] = useState<LoadedWord[]>([]);
+  const [speaker, setSpeaker] = useState("");
+  const [eventType, setEventType] = useState("");
+  const [previousEvents, setPreviousEvents] = useState<PreviousEvent[]>([]);
+  const [researchLoading, setResearchLoading] = useState(false);
+
+  useEffect(() => {
+    fetchPreviousEvents();
+  }, []);
+
+  async function fetchPreviousEvents() {
+    try {
+      const res = await fetch("/api/events/list");
+      if (res.ok) {
+        const data = await res.json();
+        setPreviousEvents(data.events ?? []);
+      }
+    } catch {
+      // silently fail
+    }
+  }
+
+  async function loadEvent() {
+    if (!url.trim()) return;
+    setLoading(true);
+    setError("");
+    setEvent(null);
+    setWords([]);
+
+    try {
+      const res = await fetch("/api/events/load", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url.trim() }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Failed to load event");
+        return;
+      }
+
+      setEvent(data.event);
+      setWords(data.words);
+      setSpeaker(data.event.speaker);
+      setEventType(data.event.event_type);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function startResearch() {
+    if (!event) return;
+    setResearchLoading(true);
+    router.push(`/research/${event.id}`);
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-2xl font-bold text-white mb-2">
+          Mention Market Research
+        </h1>
+        <p className="text-zinc-400">
+          Paste a Kalshi mention market URL to start researching word
+          probabilities.
+        </p>
+      </div>
+
+      {/* URL Input */}
+      <div className="space-y-3">
+        <div className="flex gap-3">
+          <input
+            type="text"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && loadEvent()}
+            placeholder="Paste Kalshi URL or event ticker (e.g. KXTRUMPMENTION-27FEB26)"
+            className="flex-1 px-4 py-3 bg-zinc-900 border border-zinc-700 rounded-lg text-white placeholder-zinc-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          />
+          <button
+            onClick={loadEvent}
+            disabled={loading || !url.trim()}
+            className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white font-medium rounded-lg transition-colors"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            {loading ? "Loading..." : "Load Event"}
+          </button>
         </div>
-      </main>
+        {error && (
+          <p className="text-red-400 text-sm">{error}</p>
+        )}
+      </div>
+
+      {/* Loaded Event Details */}
+      {event && (
+        <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-6 space-y-6">
+          <div>
+            <h2 className="text-xl font-semibold text-white">{event.title}</h2>
+            <p className="text-zinc-400 text-sm mt-1">
+              Ticker: {event.kalshi_event_ticker}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm text-zinc-400 mb-1">
+                Speaker
+              </label>
+              <input
+                type="text"
+                value={speaker}
+                onChange={(e) => setSpeaker(e.target.value)}
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-zinc-400 mb-1">
+                Event Type
+              </label>
+              <select
+                value={eventType}
+                onChange={(e) => setEventType(e.target.value)}
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="address_to_congress">Address to Congress</option>
+                <option value="press_conference">Press Conference</option>
+                <option value="interview">Interview</option>
+                <option value="rally">Rally</option>
+                <option value="debate">Debate</option>
+                <option value="inauguration">Inauguration</option>
+                <option value="speech">Speech (Other)</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Word List Preview */}
+          <div>
+            <h3 className="text-sm font-medium text-zinc-300 mb-3">
+              {words.length} Word Contracts
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 max-h-64 overflow-y-auto">
+              {words.map((w) => (
+                <div
+                  key={w.id}
+                  className="flex items-center justify-between px-3 py-2 bg-zinc-800/50 rounded border border-zinc-700/50 text-sm"
+                >
+                  <span className="truncate text-zinc-200">{w.word}</span>
+                  <span className="text-zinc-400 ml-2 shrink-0">
+                    {Math.round(w.yesPrice * 100)}¢
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <button
+            onClick={startResearch}
+            disabled={researchLoading}
+            className="w-full py-3 bg-green-600 hover:bg-green-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white font-medium rounded-lg transition-colors text-lg"
+          >
+            {researchLoading
+              ? "Starting Research..."
+              : "Start Baseline Research"}
+          </button>
+        </div>
+      )}
+
+      {/* Previously Researched Events */}
+      {previousEvents.length > 0 && (
+        <div className="space-y-3">
+          <h2 className="text-lg font-semibold text-white">
+            Previous Events
+          </h2>
+          <div className="space-y-2">
+            {previousEvents.map((ev) => (
+              <button
+                key={ev.id}
+                onClick={() => router.push(`/research/${ev.id}`)}
+                className="w-full text-left px-4 py-3 bg-zinc-900/50 border border-zinc-800 rounded-lg hover:border-zinc-600 transition-colors"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-white font-medium">{ev.title}</span>
+                    <span className="text-zinc-500 text-sm ml-3">
+                      {ev.speaker}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-zinc-500 text-sm">
+                      {ev.event_date
+                        ? new Date(ev.event_date).toLocaleDateString()
+                        : ""}
+                    </span>
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded-full ${
+                        ev.status === "researched"
+                          ? "bg-green-900/50 text-green-400"
+                          : ev.status === "completed"
+                            ? "bg-blue-900/50 text-blue-400"
+                            : "bg-zinc-800 text-zinc-400"
+                      }`}
+                    >
+                      {ev.status}
+                    </span>
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
