@@ -82,12 +82,24 @@ export async function POST(request: Request) {
 
     // Use SSE to stream progress
     const encoder = new TextEncoder();
+    let controllerClosed = false;
+
+    // Listen for client disconnect
+    request.signal.addEventListener("abort", () => {
+      controllerClosed = true;
+    });
+
     const stream = new ReadableStream({
       async start(controller) {
         const sendEvent = (data: unknown) => {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
-          );
+          if (controllerClosed) return;
+          try {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
+            );
+          } catch {
+            controllerClosed = true;
+          }
         };
 
         const orchestratorInput: OrchestratorInput = {
@@ -167,7 +179,13 @@ export async function POST(request: Request) {
           });
         }
 
-        controller.close();
+        if (!controllerClosed) {
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        }
       },
     });
 

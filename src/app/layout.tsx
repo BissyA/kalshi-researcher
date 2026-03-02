@@ -36,6 +36,12 @@ export default function RootLayout({
                   Kalshi Research
                 </Link>
                 <Link
+                  href="/corpus"
+                  className="text-sm text-zinc-400 hover:text-white transition-colors"
+                >
+                  Corpus
+                </Link>
+                <Link
                   href="/analytics"
                   className="text-sm text-zinc-400 hover:text-white transition-colors"
                 >

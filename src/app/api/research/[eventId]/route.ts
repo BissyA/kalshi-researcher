@@ -58,6 +58,12 @@ export async function GET(
     .select("*")
     .eq("event_id", eventId);
 
+  // Load event results (resolution data)
+  const { data: eventResults } = await supabase
+    .from("event_results")
+    .select("*")
+    .eq("event_id", eventId);
+
   return NextResponse.json({
     event,
     runs: runs ?? [],
@@ -66,6 +72,7 @@ export async function GET(
     clusters: clusters ?? [],
     words: words ?? [],
     trades: trades ?? [],
+    eventResults: eventResults ?? [],
     researchSummary: latestCompletedRun
       ? {
           historical: latestCompletedRun.historical_result,

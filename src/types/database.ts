@@ -1,3 +1,20 @@
+export interface DbSpeaker {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface DbSeries {
+  id: string;
+  speaker_id: string;
+  series_ticker: string;
+  display_name: string | null;
+  events_count: number;
+  words_count: number;
+  last_imported_at: string | null;
+  created_at: string;
+}
+
 export interface DbEvent {
   id: string;
   kalshi_event_ticker: string;
@@ -7,6 +24,7 @@ export interface DbEvent {
   event_date: string | null;
   venue: string | null;
   estimated_duration_minutes: number | null;
+  series_id: string | null;
   status: "pending" | "researched" | "live" | "completed";
   created_at: string;
   updated_at: string;
@@ -34,9 +52,10 @@ export interface DbResearchRun {
   id: string;
   event_id: string;
   layer: "baseline" | "current";
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   triggered_at: string;
   completed_at: string | null;
+  briefing: string | null;
   historical_result: unknown | null;
   agenda_result: unknown | null;
   news_cycle_result: unknown | null;
@@ -78,6 +97,7 @@ export interface DbTranscript {
   source_url: string | null;
   full_text: string;
   word_count: number | null;
+  word_frequencies: Record<string, number> | null;
   created_at: string;
 }
 

@@ -28,10 +28,23 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "URL or event ticker is required" }, { status: 400 });
     }
 
-    const eventTicker = extractEventTicker(url);
+    let eventTicker = extractEventTicker(url);
 
     // Fetch event data from Kalshi
-    const kalshiResponse = await kalshiFetch("GET", `/events/${eventTicker}`);
+    let kalshiResponse = await kalshiFetch("GET", `/events/${eventTicker}`);
+
+    // If 404, the ticker might be a market-level ticker — look up the event via the market
+    if (kalshiResponse.status === 404) {
+      const marketResponse = await kalshiFetch("GET", `/markets/${eventTicker}`);
+      if (marketResponse.ok) {
+        const marketData = await marketResponse.json();
+        const actualEventTicker = marketData.market?.event_ticker;
+        if (actualEventTicker) {
+          eventTicker = actualEventTicker;
+          kalshiResponse = await kalshiFetch("GET", `/events/${eventTicker}`);
+        }
+      }
+    }
 
     if (!kalshiResponse.ok) {
       const text = await kalshiResponse.text();

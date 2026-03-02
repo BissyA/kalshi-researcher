@@ -8,6 +8,7 @@ export interface HistoricalResult {
     url: string;
     wordCount: number;
     summary: string;
+    wordMentions?: Record<string, number>;
   }>;
   wordFrequencies: Record<
     string,
@@ -127,6 +128,7 @@ export interface ClusterResult {
     intraCorrelation: "high" | "medium" | "low";
     correlationNote: string;
     tradingImplication: string;
+    narrative?: string;
   }>;
   standaloneWords: Array<{
     word: string;
@@ -141,6 +143,7 @@ export interface ClusterResult {
 }
 
 export interface SynthesisResult {
+  briefing?: string;
   wordScores: Array<{
     word: string;
     ticker: string;
@@ -228,7 +231,7 @@ export type AgentName =
 
 export interface ResearchProgress {
   runId: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   completedAgents: AgentName[];
   currentAgent?: AgentName;
   error?: string;

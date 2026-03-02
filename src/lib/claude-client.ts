@@ -24,20 +24,51 @@ export interface AgentCallResult {
  * Parse JSON from Claude's response, handling code fences and bare JSON.
  */
 export function parseJsonResponse<T>(text: string): T {
-  // Try to extract JSON from code fences first
+  // Try to extract JSON from code fences first (most reliable)
   const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (fenceMatch) {
     return JSON.parse(fenceMatch[1].trim());
   }
 
-  // Try to find a JSON object or array in the text
-  const jsonMatch = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  if (jsonMatch) {
-    return JSON.parse(jsonMatch[1]);
+  // Try parsing the whole text as-is (Claude sometimes returns pure JSON)
+  try {
+    return JSON.parse(text.trim());
+  } catch {
+    // fall through
   }
 
-  // Last resort: try parsing the whole text
-  return JSON.parse(text);
+  // Find a JSON object by matching balanced braces
+  const startIdx = text.indexOf("{");
+  if (startIdx !== -1) {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = startIdx; i < text.length; i++) {
+      const ch = text[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\" && inString) {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          return JSON.parse(text.slice(startIdx, i + 1));
+        }
+      }
+    }
+  }
+
+  throw new Error("No valid JSON found in response");
 }
 
 /**
@@ -72,13 +103,15 @@ export async function callAgent(options: AgentCallOptions): Promise<AgentCallRes
   const MAX_CONTINUATIONS = 5; // safety limit for pause_turn resumptions
 
   for (let i = 0; i <= MAX_CONTINUATIONS; i++) {
-    const response = await anthropic.messages.create({
-      model: "claude-opus-4-0",
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      tools: tools.length > 0 ? tools : undefined,
-      messages,
-    });
+    const response = await anthropic.messages
+      .stream({
+        model: "claude-opus-4-0",
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        tools: tools.length > 0 ? tools : undefined,
+        messages,
+      })
+      .finalMessage();
 
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;

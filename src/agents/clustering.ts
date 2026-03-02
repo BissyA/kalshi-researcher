@@ -53,7 +53,8 @@ Return structured JSON in this exact format:
       "words": ["string"],
       "intraCorrelation": "high|medium|low",
       "correlationNote": "string",
-      "tradingImplication": "string"
+      "tradingImplication": "string",
+      "narrative": "string (2-4 sentences explaining why these words are grouped, what the correlation evidence is, and what it means for this specific event)"
     }
   ],
   "standaloneWords": [

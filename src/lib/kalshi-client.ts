@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 
 const KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
+const KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2";
 const SIGNING_PATH_PREFIX = "/trade-api/v2";
 
 let cachedPrivateKey: string | null = null;
@@ -75,4 +76,19 @@ export async function kalshiFetch(
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+}
+
+export { KALSHI_WS_URL };
+
+export function getKalshiWsHeaders(): Record<string, string> {
+  const privateKey = getPrivateKey();
+  const apiKey = getApiKey();
+  const timestamp = Date.now().toString();
+  const signature = signRequest(privateKey, timestamp, "GET", "/trade-api/ws/v2");
+
+  return {
+    "KALSHI-ACCESS-KEY": apiKey,
+    "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    "KALSHI-ACCESS-SIGNATURE": signature,
+  };
 }

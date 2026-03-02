@@ -4,19 +4,21 @@ import { getServerSupabase } from "@/lib/supabase";
 export async function GET() {
   const supabase = getServerSupabase();
 
-  // Overall trade stats
-  const { data: trades } = await supabase
+  // All trades (for per-event counts)
+  const { data: allTrades } = await supabase
     .from("trades")
-    .select("*")
-    .not("result", "is", null);
+    .select("*");
 
-  const totalTrades = trades?.length ?? 0;
-  const wins = trades?.filter((t) => t.result === "win").length ?? 0;
-  const losses = trades?.filter((t) => t.result === "loss").length ?? 0;
-  const totalPnlCents = trades?.reduce((sum, t) => sum + (t.pnl_cents ?? 0), 0) ?? 0;
+  // Resolved trades only (for W/L stats, P&L, edge analysis)
+  const resolvedTrades = allTrades?.filter((t) => t.result !== null) ?? [];
+
+  const totalTrades = resolvedTrades.length;
+  const wins = resolvedTrades.filter((t) => t.result === "win").length;
+  const losses = resolvedTrades.filter((t) => t.result === "loss").length;
+  const totalPnlCents = resolvedTrades.reduce((sum, t) => sum + (t.pnl_cents ?? 0), 0);
   const winRate = totalTrades > 0 ? wins / totalTrades : 0;
 
-  // Per-event breakdown
+  // Per-event breakdown (shows ALL trades including pending)
   const { data: events } = await supabase
     .from("events")
     .select("id, title, event_date, status")
@@ -24,20 +26,21 @@ export async function GET() {
 
   const eventPerformance = [];
   for (const event of events ?? []) {
-    const eventTrades = trades?.filter((t) => t.event_id === event.id) ?? [];
-    const eventWins = eventTrades.filter((t) => t.result === "win").length;
-    const eventLosses = eventTrades.filter((t) => t.result === "loss").length;
-    const eventPnl = eventTrades.reduce((sum, t) => sum + (t.pnl_cents ?? 0), 0);
+    const eventAllTrades = allTrades?.filter((t) => t.event_id === event.id) ?? [];
+    const eventResolved = eventAllTrades.filter((t) => t.result !== null);
+    const eventWins = eventResolved.filter((t) => t.result === "win").length;
+    const eventLosses = eventResolved.filter((t) => t.result === "loss").length;
+    const eventPnl = eventResolved.reduce((sum, t) => sum + (t.pnl_cents ?? 0), 0);
 
     eventPerformance.push({
       eventId: event.id,
       title: event.title,
       eventDate: event.event_date,
       status: event.status,
-      totalTrades: eventTrades.length,
+      totalTrades: eventAllTrades.length,
       wins: eventWins,
       losses: eventLosses,
-      winRate: eventTrades.length > 0 ? eventWins / eventTrades.length : 0,
+      winRate: eventResolved.length > 0 ? eventWins / eventResolved.length : 0,
       pnlCents: eventPnl,
     });
   }
@@ -91,7 +94,7 @@ export async function GET() {
     ">0.20": { trades: 0, totalPnl: 0 },
   };
 
-  for (const trade of trades ?? []) {
+  for (const trade of resolvedTrades) {
     const edge = trade.agent_edge ?? 0;
     let bucket: string;
     if (edge < -0.2) bucket = "<-0.20";

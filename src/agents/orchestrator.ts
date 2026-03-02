@@ -20,6 +20,25 @@ import {
 
 type ProgressCallback = (progress: ResearchProgress) => void;
 
+class CancelledError extends Error {
+  constructor() {
+    super("Research run was cancelled");
+    this.name = "CancelledError";
+  }
+}
+
+async function checkCancelled(supabase: ReturnType<typeof getServerSupabase>, runId: string) {
+  const { data } = await supabase
+    .from("research_runs")
+    .select("status")
+    .eq("id", runId)
+    .single();
+
+  if (data?.status === "cancelled") {
+    throw new CancelledError();
+  }
+}
+
 export async function runResearchPipeline(
   input: OrchestratorInput,
   runId: string,
@@ -46,7 +65,28 @@ export async function runResearchPipeline(
     // ──────────────────────────────────────────────────────────────
     // Phase 1: Run research agents in parallel
     // ──────────────────────────────────────────────────────────────
+    await checkCancelled(supabase, runId);
     emit("historical");
+
+    // Load cached transcripts for this speaker
+    let cachedTranscripts: Array<{ title: string; date: string; source: string; url: string; wordCount: number; summary: string }> = [];
+    try {
+      const { data: cached } = await supabase
+        .from("transcripts")
+        .select("title, event_date, source_url, word_count, full_text")
+        .eq("speaker", input.event.speaker);
+
+      cachedTranscripts = (cached ?? []).map((t) => ({
+        title: t.title ?? "",
+        date: t.event_date ?? "",
+        source: "cached",
+        url: t.source_url ?? "",
+        wordCount: t.word_count ?? 0,
+        summary: t.full_text === "(metadata only)" ? "" : (t.full_text ?? ""),
+      }));
+    } catch (cacheErr) {
+      console.error("Failed to load transcript cache:", cacheErr);
+    }
 
     const agentPromises: Array<{
       name: AgentName;
@@ -59,6 +99,7 @@ export async function runResearchPipeline(
           eventTitle: input.event.title,
           eventType: input.event.eventType,
           words: wordNames,
+          cachedTranscripts: cachedTranscripts.length > 0 ? cachedTranscripts : undefined,
         }),
       },
       {
@@ -162,18 +203,45 @@ export async function runResearchPipeline(
       overallMarketNotes: "Market analysis failed",
     };
 
-    // Save phase 1 results to DB
-    await supabase.from("research_runs").update({
-      historical_result: historicalResult,
-      agenda_result: agendaResult,
-      news_cycle_result: newsCycleResult,
-      event_format_result: eventFormatResult,
-      market_analysis_result: marketAnalysisResult,
-    }).eq("id", runId);
+    // Save phase 1 results to DB (non-critical — don't crash pipeline on failure)
+    try {
+      await supabase.from("research_runs").update({
+        historical_result: historicalResult,
+        agenda_result: agendaResult,
+        news_cycle_result: newsCycleResult,
+        event_format_result: eventFormatResult,
+        market_analysis_result: marketAnalysisResult,
+      }).eq("id", runId);
+    } catch (dbErr) {
+      console.error("Failed to save phase 1 results:", dbErr);
+    }
+
+    // Cache transcript metadata for future runs (non-critical)
+    try {
+      if (historicalResult.transcriptsFound?.length > 0) {
+        for (const t of historicalResult.transcriptsFound) {
+          await supabase.from("transcripts").upsert(
+            {
+              speaker: input.event.speaker,
+              event_type: input.event.eventType,
+              event_date: t.date || null,
+              title: t.title,
+              source_url: t.url || null,
+              full_text: t.summary || "(metadata only)",
+              word_count: t.wordCount || null,
+            },
+            { onConflict: "speaker,title,event_date" }
+          );
+        }
+      }
+    } catch (cacheErr) {
+      console.error("Failed to cache transcripts:", cacheErr);
+    }
 
     // ──────────────────────────────────────────────────────────────
     // Phase 2: Clustering (uses phase 1 outputs)
     // ──────────────────────────────────────────────────────────────
+    await checkCancelled(supabase, runId);
     emit("clustering");
 
     const clusteringResult = await runClusteringAgent({
@@ -190,13 +258,18 @@ export async function runResearchPipeline(
     totalCostCents += clusteringResult.estimatedCostCents;
     emit();
 
-    await supabase.from("research_runs").update({
-      cluster_result: clusteringResult.data,
-    }).eq("id", runId);
+    try {
+      await supabase.from("research_runs").update({
+        cluster_result: clusteringResult.data,
+      }).eq("id", runId);
+    } catch (dbErr) {
+      console.error("Failed to save cluster result:", dbErr);
+    }
 
     // ──────────────────────────────────────────────────────────────
     // Phase 3: Synthesis (combines everything)
     // ──────────────────────────────────────────────────────────────
+    await checkCancelled(supabase, runId);
     emit("synthesizer");
 
     const synthesisResult = await runSynthesizer({
@@ -225,65 +298,75 @@ export async function runResearchPipeline(
     // Phase 4: Save results
     // ──────────────────────────────────────────────────────────────
 
-    // Save word clusters to DB
-    for (const cluster of clusteringResult.data.clusters) {
-      const { data: clusterRow } = await supabase
-        .from("word_clusters")
-        .insert({
-          event_id: input.event.id,
-          cluster_name: cluster.name,
-          theme: cluster.theme,
-          correlation_note: cluster.correlationNote,
-        })
-        .select("id")
-        .single();
+    // Save word clusters to DB (non-critical — don't crash pipeline)
+    try {
+      for (const cluster of clusteringResult.data.clusters) {
+        const { data: clusterRow } = await supabase
+          .from("word_clusters")
+          .insert({
+            event_id: input.event.id,
+            cluster_name: cluster.name,
+            theme: cluster.theme,
+            correlation_note: cluster.correlationNote,
+          })
+          .select("id")
+          .single();
 
-      if (clusterRow) {
-        // Update words with cluster_id
-        for (const clusterWord of cluster.words) {
-          await supabase
-            .from("words")
-            .update({ cluster_id: clusterRow.id })
-            .eq("event_id", input.event.id)
-            .ilike("word", clusterWord);
+        if (clusterRow) {
+          for (const clusterWord of cluster.words) {
+            await supabase
+              .from("words")
+              .update({ cluster_id: clusterRow.id })
+              .eq("event_id", input.event.id)
+              .ilike("word", clusterWord);
+          }
         }
       }
+    } catch (dbErr) {
+      console.error("Failed to save clusters:", dbErr);
     }
 
-    // Save word scores
+    // Save word scores (non-critical — don't crash pipeline)
+    let savedScores = 0;
     for (const score of synthesisResult.data.wordScores) {
-      // Find the word_id
-      const { data: wordRow } = await supabase
-        .from("words")
-        .select("id")
-        .eq("event_id", input.event.id)
-        .ilike("word", score.word)
-        .single();
+      try {
+        const { data: wordRow } = await supabase
+          .from("words")
+          .select("id")
+          .eq("event_id", input.event.id)
+          .ilike("word", score.word)
+          .single();
 
-      if (wordRow) {
-        await supabase.from("word_scores").insert({
-          event_id: input.event.id,
-          word_id: wordRow.id,
-          research_run_id: runId,
-          historical_probability: score.historicalProbability,
-          agenda_probability: score.agendaProbability,
-          news_cycle_probability: score.newsCycleProbability,
-          base_rate_probability: score.baseRateProbability,
-          combined_probability: score.combinedProbability,
-          market_yes_price: score.marketYesPrice,
-          edge: score.edge,
-          confidence: score.confidence,
-          reasoning: score.reasoning,
-          key_evidence: score.keyEvidence,
-        });
+        if (wordRow) {
+          await supabase.from("word_scores").insert({
+            event_id: input.event.id,
+            word_id: wordRow.id,
+            research_run_id: runId,
+            historical_probability: score.historicalProbability ?? 0.5,
+            agenda_probability: score.agendaProbability ?? 0.5,
+            news_cycle_probability: score.newsCycleProbability ?? 0.5,
+            base_rate_probability: score.baseRateProbability ?? 0.5,
+            combined_probability: score.combinedProbability ?? 0.5,
+            market_yes_price: score.marketYesPrice ?? 0.5,
+            edge: score.edge ?? 0,
+            confidence: score.confidence ?? "low",
+            reasoning: score.reasoning ?? "",
+            key_evidence: score.keyEvidence ?? [],
+          });
+          savedScores++;
+        }
+      } catch (dbErr) {
+        console.error(`Failed to save score for "${score.word}":`, dbErr);
       }
     }
+    console.log(`Saved ${savedScores}/${synthesisResult.data.wordScores.length} word scores`);
 
     // Mark research run as completed
     await supabase.from("research_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
       synthesis_result: synthesisResult.data,
+      briefing: synthesisResult.data.briefing ?? null,
       total_input_tokens: totalInputTokens,
       total_output_tokens: totalOutputTokens,
       total_cost_cents: totalCostCents,
@@ -324,19 +407,30 @@ export async function runResearchPipeline(
       },
     };
   } catch (error) {
-    // Mark run as failed
-    await supabase.from("research_runs").update({
-      status: "failed",
-      error_message: error instanceof Error ? error.message : String(error),
-      completed_at: new Date().toISOString(),
-      total_input_tokens: totalInputTokens,
-      total_output_tokens: totalOutputTokens,
-      total_cost_cents: totalCostCents,
-    }).eq("id", runId);
+    const isCancelled = error instanceof CancelledError;
+
+    // Don't overwrite "cancelled" status if already set by the stop endpoint
+    if (!isCancelled) {
+      await supabase.from("research_runs").update({
+        status: "failed",
+        error_message: error instanceof Error ? error.message : String(error),
+        completed_at: new Date().toISOString(),
+        total_input_tokens: totalInputTokens,
+        total_output_tokens: totalOutputTokens,
+        total_cost_cents: totalCostCents,
+      }).eq("id", runId);
+    } else {
+      // Update token usage on cancellation
+      await supabase.from("research_runs").update({
+        total_input_tokens: totalInputTokens,
+        total_output_tokens: totalOutputTokens,
+        total_cost_cents: totalCostCents,
+      }).eq("id", runId);
+    }
 
     onProgress?.({
       runId,
-      status: "failed",
+      status: isCancelled ? "cancelled" : "failed",
       completedAgents: [...completedAgents],
       error: error instanceof Error ? error.message : String(error),
     });

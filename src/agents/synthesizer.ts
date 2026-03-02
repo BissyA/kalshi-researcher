@@ -36,9 +36,10 @@ export async function runSynthesizer(
   const scriptedWeight = input.eventFormatResult.implications?.scriptedWeight ?? 0.5;
   const currentContextWeight = input.eventFormatResult.implications?.currentContextWeight ?? 0.5;
 
+  const hasNewsCycle = input.newsCycleResult != null;
   const historicalWeight = Math.round(scriptedWeight * 40);
   const agendaWeight = 25;
-  const newsWeight = Math.round(currentContextWeight * 25);
+  const newsWeight = hasNewsCycle ? Math.round(currentContextWeight * 25) : 0;
   const baseRateWeight = 100 - historicalWeight - agendaWeight - newsWeight;
 
   const systemPrompt = `You are an expert prediction market analyst and political speech forecaster. You have been given comprehensive research about an upcoming event. Your job is to produce a final probability estimate for each word being mentioned.
@@ -56,7 +57,7 @@ Research inputs are provided below. Use ALL of them to form your estimates.
 Weighting framework (adjusted for event format):
 - Historical frequency: ${historicalWeight}% weight
 - Agenda/preview: ${agendaWeight}% weight
-- News cycle: ${newsWeight}% weight
+${hasNewsCycle ? `- News cycle: ${newsWeight}% weight` : "- News cycle: NOT AVAILABLE (baseline layer — set newsCycleProbability to 0.5 for all words)"}
 - Base rate: ${baseRateWeight}% weight
 
 Important calibration guidance:
@@ -68,9 +69,22 @@ Important calibration guidance:
 - Be aware that market prices incorporate crowd wisdom — if you disagree significantly with the market, explain why with specific evidence.
 - For a ${input.eventFormatResult.estimatedDurationMinutes}-minute ${input.eventFormatResult.format} speech, adjust base rates accordingly (longer = higher probability for most words).
 
+In addition to the structured word scores, produce a comprehensive research briefing as a markdown document in the "briefing" field. This briefing will be the primary thing the trader reads. It must:
+1. Be written as a flowing narrative, not a list of bullet points
+2. Explicitly name and cite every transcript used, with dates and word counts
+3. Quote specific evidence — e.g., "In the Laredo remarks, Trump mentioned 'border' 14 times and 'wall' 8 times"
+4. Cite news sources with their publication names
+5. Highlight the MOST IMPORTANT findings first
+6. Include a section on risks and uncertainties — what could make predictions wrong
+7. Include market observations — where you see edge and why
+8. Be 800-1500 words — thorough but readable in 5 minutes
+
+The trader will use this briefing to form their OWN view before looking at scores. Write it as if you're briefing a trader before a session, not as a data dump. Use markdown headings (##), bold, and bullet points for structure.
+
 Return structured JSON in this exact format:
 \`\`\`json
 {
+  "briefing": "## Event Overview\\n\\nMarkdown briefing document here...",
   "wordScores": [
     {
       "word": "string",
@@ -116,7 +130,7 @@ ${JSON.stringify(input.historicalResult, null, 2)}
 ${JSON.stringify(input.agendaResult, null, 2)}
 
 === NEWS CYCLE ANALYSIS ===
-${input.newsCycleResult ? JSON.stringify(input.newsCycleResult, null, 2) : "Not available (baseline layer — news cycle not analyzed)"}
+${hasNewsCycle ? JSON.stringify(input.newsCycleResult, null, 2) : "NOT AVAILABLE — This is a baseline run. News cycle was not analyzed. Set newsCycleProbability to 0.5 for all words and rely on historical + agenda + base rate for your estimates."}
 
 === EVENT FORMAT ANALYSIS ===
 ${JSON.stringify(input.eventFormatResult, null, 2)}
@@ -137,7 +151,7 @@ Produce a score for EVERY word. Be precise, well-calibrated, and provide actiona
   return callAgentForJson<SynthesisResult>({
     systemPrompt,
     userMessage,
-    maxTokens: 24000,
+    maxTokens: 32000,
     enableWebSearch: false,
   });
 }

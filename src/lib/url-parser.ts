@@ -14,10 +14,21 @@ export function extractEventTicker(input: string): string {
     try {
       const url = new URL(trimmed);
       const segments = url.pathname.split("/").filter(Boolean);
+
       // /events/TICKER or /events/TICKER/markets/...
       const eventsIdx = segments.indexOf("events");
       if (eventsIdx !== -1 && segments[eventsIdx + 1]) {
-        return segments[eventsIdx + 1];
+        return segments[eventsIdx + 1].toUpperCase();
+      }
+
+      // /markets/SERIES/SLUG/TICKER — Kalshi website format
+      const marketsIdx = segments.indexOf("markets");
+      if (marketsIdx !== -1) {
+        // The last segment is the ticker (event or market level)
+        const lastSegment = segments[segments.length - 1];
+        if (lastSegment) {
+          return lastSegment.toUpperCase();
+        }
       }
     } catch {
       // fall through to raw string handling
@@ -25,7 +36,7 @@ export function extractEventTicker(input: string): string {
   }
 
   // Otherwise treat the whole string as a ticker (strip whitespace)
-  return trimmed;
+  return trimmed.toUpperCase();
 }
 
 /**
