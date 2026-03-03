@@ -1,10 +1,9 @@
-export type CorpusTab = "mentions" | "transcripts" | "markets" | "quick";
+export type CorpusTab = "mentions" | "markets" | "quick";
 
 interface CorpusTabNavProps {
   activeTab: CorpusTab;
   onTabChange: (tab: CorpusTab) => void;
   mentionCount: number;
-  transcriptCount: number;
   seriesCount: number;
 }
 
@@ -12,12 +11,10 @@ export function CorpusTabNav({
   activeTab,
   onTabChange,
   mentionCount,
-  transcriptCount,
   seriesCount,
 }: CorpusTabNavProps) {
   const tabs: { id: CorpusTab; label: string; count: number }[] = [
     { id: "mentions", label: "Mention History", count: mentionCount },
-    { id: "transcripts", label: "Transcript Library", count: transcriptCount },
     { id: "markets", label: "Kalshi Markets", count: seriesCount },
     { id: "quick", label: "Quick Analysis", count: 0 },
   ];

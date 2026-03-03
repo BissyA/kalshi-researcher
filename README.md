@@ -20,7 +20,7 @@ AI-powered research tool for Kalshi "mention markets" — prediction contracts o
 - [API Routes](#api-routes)
 - [Frontend Pages](#frontend-pages)
 - [Component Architecture](#component-architecture)
-- [Transcript System](#transcript-system)
+- [Sources System](#sources-system)
 - [Live Prices (WebSocket)](#live-prices-websocket)
 - [Trade Logging & Settlement](#trade-logging--settlement)
 - [How to Run](#how-to-run)
@@ -42,21 +42,20 @@ This tool:
 1. **Loads** a Kalshi mention market event by URL or ticker
 2. **Runs 7 AI research agents** (powered by Claude Opus 4) to analyze historical patterns, current news, agenda items, and market pricing
 3. **Produces per-word probability estimates** with reasoning
-4. **Generates a markdown research briefing** — an 800-1500 word analyst narrative citing specific transcripts, sources, and evidence
-5. **Groups words into thematic clusters** with correlation analysis and trading implications
-6. **Identifies mispriced contracts** where agent probability diverges from market price
+4. **Surfaces structured event context** — event format, duration, Q&A expectations, agenda analysis, exogenous events, likely topics, and recent speaker statements extracted from agent results
+5. **Displays corpus-integrated word analysis** — live market prices cross-referenced against historical mention rates from Kalshi settled market data (ground truth), with manual speaker selection, expandable per-event detail, and edge detection
+6. **Identifies mispriced contracts** where historical mention rate diverges from market price
 7. **Streams live prices** via WebSocket from Kalshi
 8. **Logs trades** with inline forms on the research dashboard
 9. **Auto-settles trades** by polling Kalshi's market resolution API
 10. **Tracks performance** with Recharts charts on the analytics page
-11. **Manages a transcript corpus** — upload, browse, search, and analyze word frequencies across cached speech transcripts
-12. **Tracks word mention rates** across all historical Kalshi events per speaker via the Corpus page
-13. **Manages Kalshi market series** — search and add series from the Kalshi API, import historical settled events, refresh data per-series
-14. **Quick Analysis** — paste a Kalshi mention market URL to instantly compare live market prices against historical mention rates, with WebSocket live price updates, saved search persistence, and edge detection
+11. **Tracks word mention rates** across all historical Kalshi events per speaker via the Corpus page
+12. **Manages Kalshi market series** — search and add series from the Kalshi API, import historical settled events, refresh data per-series
+13. **Quick Analysis** — paste a Kalshi mention market URL to instantly compare live market prices against historical mention rates, with WebSocket live price updates, saved search persistence, and edge detection
 
 The research happens in two layers:
-- **Baseline layer** (structural edge): historical frequency, event format analysis, agenda research
-- **Current layer** (information edge): last-72-hour news, breaking developments, real-time context
+- **Baseline layer** (comprehensive): historical frequency, event format analysis, agenda research, news cycle analysis, market structure
+- **Current layer** (refresh): re-runs all agents with latest data closer to the event. Reuses baseline results as context.
 
 ### What has been tested end-to-end
 - One successful "current" layer research run (Trump Corpus Christi speech, Feb 28 2026)
@@ -64,10 +63,15 @@ The research happens in two layers:
 - Settlement checking via Kalshi API
 - Analytics page rendering with Recharts charts
 - Live WebSocket price streaming
-- Dashboard redesign with tabbed layout (Research | Transcripts | Trade Log)
-- Corpus page: speaker management, series import (KXTRUMPMENTION — 115 events, 2723 words), mention history with expandable per-event detail, transcript library with search/upload/download
+- Dashboard redesign with tabbed layout (Research | Sources | Trade Log)
+- EventContext component: structured event format, agenda, news cycle, and likely topics from agent results
+- WordTable component: corpus-integrated word analysis with manual speaker selection, historical rates from settled Kalshi markets, expandable per-event detail
+- Corpus page: speaker management, series import (KXTRUMPMENTION — 114 events, KXTRUMPMENTIONB — 57 events, KXBUSINESSROUNDTABLE — 1 event), mention history with expandable per-event detail
 - Historical data import from Kalshi API with pagination (handles 100+ events)
+- Speaker persistence: select speaker in research page WordTable → saves to event record → analytics pulls corpus historical rates for that speaker
+- Analytics expandable trade detail with corpus-based mention rates and edge calculations
 - Quick Analysis tab: paste URL → live price vs historical rate comparison with WebSocket updates and saved searches
+- News Cycle agent runs on both baseline and current layers
 
 ---
 
@@ -107,7 +111,8 @@ kalshi-research/
 │       ├── 001_initial_schema.sql    # 8 tables, 2 views, 7 indexes
 │       ├── 002_rls_policies.sql      # RLS + anon read policies
 │       ├── 003_dashboard_redesign.sql # briefing column, word_frequencies, cancelled status
-│       └── 004_speakers_and_series.sql # speakers + series tables, events.series_id FK
+│       ├── 004_speakers_and_series.sql # speakers + series tables, events.series_id FK
+│       └── 005_event_speaker_id.sql   # events.speaker_id FK to speakers table
 │
 └── src/
     ├── types/
@@ -141,27 +146,29 @@ kalshi-research/
     ├── components/
     │   ├── corpus/               # 8 components for the /corpus page
     │   │   ├── SpeakerSelector.tsx       # Speaker dropdown with inline "Add New Speaker"
-    │   │   ├── CorpusTabNav.tsx          # 4-tab switcher: Mention History | Transcript Library | Kalshi Markets | Quick Analysis
+    │   │   ├── CorpusTabNav.tsx          # 3-tab switcher: Mention History | Kalshi Markets | Quick Analysis
     │   │   ├── MentionSummaryStats.tsx   # Stat cards: words tracked, settled events, avg rate, top word
     │   │   ├── MentionHistoryTable.tsx   # Sortable, searchable table with expandable per-event detail rows + reset sort
-    │   │   ├── TranscriptSearchBar.tsx   # Debounced text search input
+    │   │   ├── TranscriptSearchBar.tsx   # Debounced text search input (used by Quick Analysis)
     │   │   ├── KalshiMarketsTab.tsx      # Series management: add/delete/import/refresh + expandable events + word results
     │   │   ├── KalshiSeriesSearch.tsx    # Searchable dropdown querying Kalshi API for available series
     │   │   └── QuickAnalysisTab.tsx      # Paste URL → live price vs historical rate comparison with saved searches
     │   │
-    │   └── research/             # 17 extracted components for the research dashboard
+    │   └── research/             # Research dashboard components
     │       ├── EventHeader.tsx
     │       ├── ProgressMessages.tsx
-    │       ├── TabNavigation.tsx
-    │       ├── ResearchBriefing.tsx
-    │       ├── ClusterView.tsx
-    │       ├── WordAnalysisTable.tsx
+    │       ├── TabNavigation.tsx         # 3 tabs: Research | Sources | Trade Log
+    │       ├── EventContext.tsx          # **NEW** — Event structure + analysis from agent results
+    │       ├── WordTable.tsx             # **NEW** — Corpus-integrated word analysis with speaker selector
     │       ├── AgentOutputAccordion.tsx
-    │       ├── WordScoresTable.tsx
+    │       ├── WordScoresTable.tsx       # Used on Trade Log tab (not Research tab)
     │       ├── LoggedTrades.tsx
     │       ├── ResolveEvent.tsx
     │       ├── RunHistory.tsx
-    │       ├── TranscriptsTab.tsx
+    │       ├── SourcesTab.tsx            # Aggregated sources from all agents with type tags
+    │       ├── ResearchBriefing.tsx      # (kept but NOT rendered — may repurpose later)
+    │       ├── ClusterView.tsx           # (kept but NOT rendered — will return in future iteration)
+    │       ├── WordAnalysisTable.tsx     # (kept but NOT rendered on Research tab — superseded by WordTable)
     │       ├── CorpusStats.tsx
     │       ├── FrequencyTable.tsx
     │       ├── TranscriptList.tsx        # Includes optional download button (showDownload prop)
@@ -175,10 +182,10 @@ kalshi-research/
         │
         ├── research/
         │   └── [eventId]/
-        │       └── page.tsx      # Research dashboard (~280 lines, thin shell with tabs)
+        │       └── page.tsx      # Research dashboard (thin shell with tabs, corpus speaker integration)
         │
         ├── corpus/
-        │   └── page.tsx          # Corpus: speaker management, mention history, transcripts, Kalshi markets, quick analysis
+        │   └── page.tsx          # Corpus: speaker management, mention history, Kalshi markets, quick analysis
         │
         ├── analytics/
         │   └── page.tsx          # Performance analytics with Recharts charts
@@ -186,7 +193,8 @@ kalshi-research/
         └── api/
             ├── events/
             │   ├── load/route.ts         # POST: load event from Kalshi
-            │   └── list/route.ts         # GET: list all events
+            │   ├── list/route.ts         # GET: list all events
+            │   └── speaker/route.ts      # PATCH: persist speaker selection on an event
             │
             ├── research/
             │   ├── trigger/route.ts      # POST: start research (SSE stream)
@@ -216,7 +224,7 @@ kalshi-research/
             │   ├── speakers/route.ts         # GET/POST/DELETE: manage speakers table
             │   ├── series/
             │   │   ├── route.ts              # GET/POST/DELETE: manage series for a speaker
-            │   │   └── events/route.ts       # GET: list events + word results for a series
+            │   │   └── events/route.ts       # GET: list events + word results for a series. DELETE: remove single event + track in excluded_tickers
             │   ├── mention-history/route.ts  # GET: aggregated word mention rates across events
             │   ├── import-historical/route.ts # POST: import settled events from Kalshi API
             │   ├── kalshi-series/route.ts    # GET: search Kalshi API for available series (cached)
@@ -260,7 +268,7 @@ The `KALSHI_PRIVATE_KEY` env var takes precedence over `KALSHI_PRIVATE_KEY_PATH`
 
 **Supabase project**: `hczppfsuqtpccxvmyaue`
 
-All 4 migrations (001-004) have been applied to the live Supabase database.
+All 6 migrations (001-006) have been applied to the live Supabase database.
 
 10 tables + 2 views:
 
@@ -282,6 +290,7 @@ Links a Kalshi series ticker to a speaker. Each series contains multiple events.
 | display_name | text | Nullable. e.g. "Trump Mention Markets" |
 | events_count | integer | Updated after import. Default: 0 |
 | words_count | integer | Updated after import. Default: 0 |
+| excluded_tickers | text[] | **Migration 006**. Default `'{}'`. Tracks event tickers the user has removed from this series so they won't be re-imported on refresh |
 | last_imported_at | timestamptz | Nullable. Set after each import |
 | created_at | timestamptz | |
 
@@ -298,6 +307,7 @@ Primary table for mention market events.
 | venue | text | Nullable |
 | estimated_duration_minutes | integer | Set after event_format agent runs |
 | series_id | uuid (FK → series) | **Migration 004**. ON DELETE SET NULL |
+| speaker_id | uuid (FK → speakers) | **Migration 005**. ON DELETE SET NULL. Explicit speaker linkage for analytics — set from research page speaker dropdown. Used by analytics API to pull corpus historical mention rates. |
 | status | text | `pending` → `researched` → `live` → `completed` |
 | created_at, updated_at | timestamptz | |
 
@@ -324,7 +334,7 @@ Each research execution against an event.
 | briefing | text | **Migration 003** — Markdown research briefing from synthesizer |
 | historical_result | jsonb | Phase 1 agent output |
 | agenda_result | jsonb | Phase 1 agent output |
-| news_cycle_result | jsonb | Phase 1 agent output (null for baseline layer) |
+| news_cycle_result | jsonb | Phase 1 agent output (runs on both layers) |
 | event_format_result | jsonb | Phase 1 agent output |
 | market_analysis_result | jsonb | Phase 1 agent output |
 | cluster_result | jsonb | Phase 2 agent output |
@@ -365,7 +375,7 @@ Thematic groupings of words.
 | theme | text | |
 | correlation_note | text | |
 
-**Note**: Rich cluster data (tradingImplication, intraCorrelation, narrative) lives in the `research_runs.cluster_result` JSONB column. The `ClusterView` component merges both sources by matching on cluster name.
+**Note**: Rich cluster data (tradingImplication, intraCorrelation, narrative) lives in the `research_runs.cluster_result` JSONB column. The `ClusterView` component (currently not rendered on the Research tab, kept for future use) merges both sources by matching on cluster name.
 
 ### `transcripts`
 Cached speech transcript metadata (populated by orchestrator after runs, or manually uploaded).
@@ -426,6 +436,7 @@ Ground truth outcomes after events conclude.
 | 002_rls_policies.sql | Applied | RLS + anon read policies |
 | 003_dashboard_redesign.sql | Applied | briefing column, word_frequencies, cancelled status |
 | 004_speakers_and_series.sql | Applied | speakers + series tables, events.series_id FK, indexes |
+| 005_event_speaker_id.sql | Applied | events.speaker_id FK to speakers, index |
 
 ---
 
@@ -437,13 +448,20 @@ The Corpus page (`/corpus`) provides cross-event analytics and historical data m
 
 ```
 speakers (manually created)
-  └── series (Kalshi series tickers, linked to speaker)
-       └── events (individual Kalshi events, linked to series via events.series_id)
-            └── words (word contracts per event)
-                 └── event_results (was_mentioned: yes/no per word per event)
+  ├── series (Kalshi series tickers, linked to speaker via series.speaker_id)
+  │    └── events (individual Kalshi events, linked to series via events.series_id)
+  │         └── words (word contracts per event)
+  │              └── event_results (was_mentioned: yes/no per word per event)
+  │
+  └── events (direct speaker link via events.speaker_id — set from research page)
+       └── Used by analytics to pull corpus historical mention rates
 ```
 
-**Critical design decision**: Speakers are NEVER inferred from event titles. The user explicitly creates a speaker, then adds Kalshi series to that speaker. This was a deliberate choice — inferring speakers from titles like "Trump Address to Congress" is too fragile for serious trading decisions.
+**Two speaker linkage paths**:
+1. **Corpus path** (indirect): `speakers` → `series` → `events` (via `events.series_id`). This links corpus-imported events to speakers through their Kalshi series.
+2. **Direct path**: `speakers` → `events` (via `events.speaker_id`). This is set explicitly by the user from the research page WordTable dropdown. Used by the analytics API to know which speaker's corpus data to pull for historical mention rates.
+
+**Critical design decision**: Speakers are NEVER inferred from event titles. The user explicitly creates a speaker, then adds Kalshi series to that speaker. For analytics, the user explicitly links each event to a speaker via the research page. This was a deliberate choice — inferring speakers from titles like "Trump Address to Congress" is too fragile for serious trading decisions.
 
 ### User Flow
 
@@ -502,9 +520,12 @@ Lightweight read-only endpoint for the Quick Analysis tab. Does NOT write to the
 
 As of the last import:
 - **1 speaker**: Donald Trump
-- **2 series**: KXTRUMPMENTION (116 events, 2723+ words)
-- **116 events with word results**
-- **827 unique word-mention data points** across 116 settled events
+- **3 series**: KXTRUMPMENTION (114 events), KXTRUMPMENTIONB (57 events), KXBUSINESSROUNDTABLE (1 event)
+- **172 events with word results** (across all series — some events share titles but are different real-world events on different dates)
+- **No true duplicate events** — each event has a unique `kalshi_event_ticker`. Events with identical titles (e.g., "What will Trump say during his announcement?" appearing multiple times) are different events on different dates.
+- **Cross-series events on the same day** are different appearances (e.g., a rally in one series, a dinner in another). Kalshi uses the "B" series to handle overflow/volume.
+
+**Known data issue**: `KXTRUMPMENTIONB-25DEC03` has 20 words but 0 event_results — the result upsert failed during import (likely transient DB error). Fix: click "Refresh" on the KXTRUMPMENTIONB series to re-import, which will idempotently fill in the missing results.
 
 ---
 
@@ -584,7 +605,7 @@ All agents live in `src/agents/`. Each exports a single `run*Agent(input)` funct
 |-------|------|-----------|------------|---------|
 | Historical | `historical.ts` | Yes | 16,384 | Searches past speech transcripts, counts word frequencies. Accepts optional `cachedTranscripts` to skip redundant web searches. Returns per-transcript `wordMentions` map. |
 | Agenda | `agenda.ts` | Yes | 16,384 | Finds advance info, press releases, social media hints about topics |
-| News Cycle | `news-cycle.ts` | Yes | 16,384 | Analyzes last 72 hours of news for each word. **Only runs for "current" layer** |
+| News Cycle | `news-cycle.ts` | Yes | 16,384 | Analyzes last 72 hours of news for each word. **Runs on both baseline and current layers** |
 | Event Format | `event-format.ts` | Yes | 8,192 | Determines duration, scripted vs unscripted ratio, outputs weighting factors |
 | Market Analysis | `market-analysis.ts` | No | 12,288 | Pure price/volume analysis, identifies mispricings, correlations |
 
@@ -674,9 +695,11 @@ interface OrchestratorInput {
 
 `src/agents/orchestrator.ts` — `runResearchPipeline(input, runId, onProgress?)`
 
-### Transcript Caching
+### Transcript Caching (Internal Optimization)
 
 Before Phase 1, the orchestrator queries the `transcripts` table for the speaker's cached transcripts. These are passed to the historical agent as `cachedTranscripts` so it can skip redundant web searches. After Phase 1, newly found transcript metadata is upserted back into the `transcripts` table for future runs.
+
+**Note**: The `transcripts` table is an internal optimization cache only. It is NOT exposed on any user-facing page. The Sources tab on the research dashboard shows agent-found transcripts from `research_runs.historical_result` JSONB, not from the `transcripts` table.
 
 ### Cancellation Support
 
@@ -704,7 +727,8 @@ All DB writes are individually wrapped in try/catch — a failed write doesn't c
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/events/load` | POST | Load event from Kalshi by URL or ticker |
-| `/api/events/list` | GET | List all previously loaded events |
+| `/api/events/list` | GET | List events with research runs (excludes corpus-only imports) |
+| `/api/events/speaker` | PATCH | Persist speaker selection on an event `{ eventId, speakerId }` |
 | `/api/research/trigger` | POST | Start research pipeline (returns SSE stream) |
 | `/api/research/stop` | POST | Cancel a running research run |
 | `/api/research/[eventId]` | GET | Get full research data for an event |
@@ -749,7 +773,7 @@ All DB writes are individually wrapped in try/catch — a failed write doesn't c
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/ws/prices` | GET | WebSocket-to-SSE proxy for live Kalshi prices |
-| `/api/analytics/performance` | GET | Aggregate analytics |
+| `/api/analytics/performance` | GET | Aggregate analytics with per-trade corpus historical rates |
 
 ---
 
@@ -761,27 +785,50 @@ All DB writes are individually wrapped in try/catch — a failed write doesn't c
 - Displays event details: title, ticker, speaker (editable), event type (dropdown)
 - Shows grid of all word contracts with current YES prices
 - "Start Baseline Research" button navigates to research page
-- Lists previously loaded events at the bottom
+- **"Researched Events" list** at the bottom — only shows events that have at least one research run (filtered via `/api/events/list` which queries `research_runs` table). Corpus-imported events without research runs are excluded entirely.
 
 ### Research Dashboard (`/research/[eventId]`)
-The main working page. Thin shell (~280 lines) with 17 extracted components in a tabbed layout.
+The main working page for tactical research on a specific upcoming Kalshi mention market event. Tabbed layout with extracted components.
 
 **Always visible:**
 - `EventHeader` — Event title, speaker, date, WS status, research buttons
 - `ProgressMessages` — Real-time SSE progress during active research
-- `TabNavigation` — Three tabs: Research | Transcripts | Trade Log
+- `TabNavigation` — Three tabs: Research | Sources | Trade Log
 - `RunHistory` — Expandable research run history
 
-**Research tab**: ResearchBriefing, ClusterView, WordAnalysisTable, AgentOutputAccordion
-**Transcripts tab**: TranscriptsTab (own data fetching), CorpusStats, FrequencyTable, TranscriptList, TranscriptViewer, TranscriptUpload
+**Research tab** (designed for the trader's pre-event workflow):
+1. `EventContext` — Structured event context surfaced from agent results:
+   - **Event Structure section**: Format (scripted/unscripted/mixed), estimated duration + range, Q&A (yes/no), live (yes/no), agent explanation of format and duration effects, trading weight footer (Historical weight %, Current context weight %, Word count expectation). Data from `EventFormatResult`.
+   - **Event Analysis section**: Breaking news alert banner (if any), Agenda & Purpose with advance sources, Exogenous Events sorted by relevance (HIGH/MEDIUM/LOW) with speaker framing, Recent Speaker Statements with dates and context, Likely Topics sorted by likelihood (very_likely → unlikely) with evidence strings and related market words. Data from `AgendaResult` and `NewsCycleResult`.
+   - Shows placeholder when no research has been run yet.
+
+2. `WordTable` — Corpus-integrated word analysis (replaces the old WordAnalysisTable):
+   - **Manual speaker selector** in the header — dropdown of all speakers from the corpus system. User selects which speaker's historical data to cross-reference against.
+   - **Historical rates from corpus only** — mention rates come exclusively from Kalshi settled market data (ground truth via `MentionHistoryRow`), NOT from the agent's web-scraped transcripts. This provides 100+ event sample sizes instead of ~9 from web scraping.
+   - **Columns**: Word, Market Price (live via WebSocket), Historical Rate (color-coded badge: green ≥60%, yellow ≥30%, red <30%), Edge (historical rate - market price), Sample (yes/total)
+   - **Expandable rows** — click any word to see event-by-event results (event title, ticker, date, MENTIONED/NOT MENTIONED badge) from the corpus
+   - **Sortable** by all columns. Default sort: Edge descending.
+   - Data flow: `wordScores` (from research run) provide the word list + market tickers → `livePrices` (from WebSocket) update market prices → `mentionData` (from `/api/corpus/mention-history`) provides historical rates matched by normalized word name
+
+3. `AgentOutputAccordion` — Expandable raw agent outputs for debugging
+
+**Sources tab**: `SourcesTab` — aggregates every source used across all research agents, with type tags. Extracts sources from the latest completed run's `historical_result`, `agenda_result`, `news_cycle_result`, and `event_format_result`. Each source is tagged by type:
+  - **Transcript** (blue) — from historical agent's `transcriptsFound[]`
+  - **Agenda** (green) — from agenda agent's `sourcesFound[]`
+  - **News** (amber) — from news cycle agent's `trendingTopics[].sources[]`
+  - **Statement** (rose) — from news cycle agent's `recentSpeakerStatements[]`
+  - **Event** (purple) — from event format agent's `comparableEvents[]`
+
+  Sources with URLs are clickable. Summary badges at the top show counts per type. The `extractSources()` helper function (exported from `SourcesTab.tsx`) handles the extraction logic.
+
 **Trade Log tab**: WordScoresTable (with inline trade forms), LoggedTrades, ResolveEvent
 
 ### Corpus Page (`/corpus`)
-Standalone page for cross-event analytics, completely separate from individual research runs.
+Strategic analytics page for long-term speaker data, completely separate from individual research runs. All data here comes from Kalshi's settled market results (ground truth), not from AI agent analysis.
 
 **Layout:**
 - Header with SpeakerSelector dropdown (includes "Add New Speaker")
-- 4-tab navigation: Mention History | Transcript Library | Kalshi Markets | Quick Analysis
+- 3-tab navigation: Mention History | Kalshi Markets | Quick Analysis
 - All tabs filter by the selected speaker
 
 **Mention History tab:**
@@ -791,12 +838,6 @@ Standalone page for cross-event analytics, completely separate from individual r
   - **Reset sort button** appears when sort differs from default (Total desc) — click to reset
   - Color-coded rates (green ≥60%, yellow ≥30%, red <30%)
   - Click any row to expand → shows per-event detail (event title, date, MENTIONED/NOT MENTIONED badge)
-
-**Transcript Library tab:**
-- `CorpusStats` — Total transcripts, total words, speaker, date range
-- `TranscriptSearchBar` — Debounced text search (searches full_text via ilike)
-- Upload/download/delete transcripts
-- Reuses `TranscriptList`, `TranscriptViewer`, `TranscriptUpload` from research components
 
 **Kalshi Markets tab:**
 - `KalshiSeriesSearch` — Searchable dropdown querying the Kalshi API for all available series. Type a keyword (e.g., "mention", "trump", "vance") to filter. Click a result to add the series to the speaker.
@@ -820,9 +861,17 @@ Standalone page for cross-event analytics, completely separate from individual r
 - **localStorage format**: `kalshi-quick-analysis-{speakerId}` stores `SavedSearch[]` where each entry is `{ url, eventTitle, eventTicker }`. Handles migration from older single-object format.
 
 ### Analytics Page (`/analytics`)
-- Overall Stats cards: Total trades, wins, losses, win rate, total P&L
-- Per-Event table, Calibration Chart, Edge vs P&L Chart, P&L by Event Chart
-- Dark theme Recharts charts
+- **Overall Stats cards**: Total trades, wins, losses, win rate, total P&L (resolved trades only)
+- **Per-Event Performance table**: Only shows events with at least one trade (corpus-only events excluded). Columns: Event, Date, Trades, W/L, Win Rate, P&L.
+  - **Expandable rows** — click any event to expand and see individual trade detail. Chevron (▶) rotates 90° when expanded.
+  - **Trade detail sub-table** (8 columns): Word, Side (YES/NO pill), Entry Price, Contracts, Mention Rate, Edge, Result (W/L), P&L.
+  - **Mention Rate** = historical corpus mention rate (from `event_results` settled data via the event's `speaker_id` linkage). NOT the AI synthesizer's `combined_probability`. Shows "-" if no speaker is linked.
+  - **Edge** = `historical_rate - entry_price`. Color-coded: green for positive (underpriced), red for negative (overpriced). Shows "-" if no speaker is linked.
+  - **Data flow for historical rates**: `events.speaker_id` → `series` (where `speaker_id` matches) → all corpus `events` in those series → `event_results` joined with `words` → group by normalized word → `mentionRate = mentioned / total`. Paginated to handle Supabase 1000-row limit.
+- **Calibration Chart**: Agent probability buckets vs actual mention outcomes (from `word_scores` + `event_results`)
+- **Edge vs P&L Chart**: Average P&L by agent edge bucket
+- **P&L by Event Chart**: Bar chart of P&L per event over time
+- Dark theme Recharts charts with custom DarkTooltip component
 
 ---
 
@@ -830,7 +879,7 @@ Standalone page for cross-event analytics, completely separate from individual r
 
 ### Shared Types (`src/types/components.ts`)
 
-All component prop types defined here: Event, WordScore, Cluster, ResearchRun, ResearchSummary, Trade, Word, EventResult, SortKey, TabId, PriceData.
+All component prop types defined here: Event, WordScore, Cluster, ResearchRun, ResearchSummary, Trade, Word, EventResult, SortKey, TabId (`"research" | "sources" | "tradelog"`), PriceData.
 
 ### Corpus Types (`src/types/corpus.ts`)
 
@@ -865,26 +914,61 @@ interface HistoricalImportResult {
 
 TypeScript interfaces for all DB rows: `DbSpeaker`, `DbSeries`, `DbEvent`, `DbWord`, `DbWordCluster`, `DbResearchRun`, `DbWordScore`, `DbTranscript`, `DbTrade`, `DbEventResult`.
 
-### Backward Compatibility
+### Key Component Details
 
-All components handle missing data from older research runs:
-- `ResearchBriefing`: Shows "Run new research to generate a briefing" when `briefing` is null
-- `ClusterView`: Falls back to `correlationNote` when `narrative` field is missing
-- Components handle optional fields gracefully throughout
+**`EventContext.tsx`** (new):
+- Props: `{ eventFormat: EventFormatResult | null; agenda: AgendaResult | null; newsCycle: NewsCycleResult | null }`
+- Derived from `latestCompletedRun` in the research page — casts the JSONB columns to their typed interfaces
+- Helper functions: `likelihoodColor()` for topic likelihood badges, `relevanceColor()` for exogenous event relevance badges
+- Shows a "Run research to see event context" placeholder when all three props are null
+
+**`WordTable.tsx`** (new):
+- Props: `{ wordScores: WordScore[]; livePrices: Record<string, PriceData>; mentionData: MentionHistoryRow[]; mentionLoading: boolean; speakers: Array<{ id: string; name: string }>; selectedSpeakerId: string; onSpeakerChange: (speakerId: string) => void }`
+- Builds a `mentionRateMap` (word name → rate + events) from corpus `MentionHistoryRow[]`
+- Merges word scores (for the word list + market tickers), live prices (for current market price), and corpus data (for historical rate, edge, sample, and per-event detail)
+- Manages its own expand/collapse state for per-event detail rows
+- Shows "Select a speaker" prompt when no speaker is selected
+- **Speaker selection persists**: `onSpeakerChange` callback saves the selection to the event record via `PATCH /api/events/speaker`, so it survives page reloads and is available to the analytics API
+
+**Unused but kept components** (may be repurposed later):
+- `ResearchBriefing.tsx` — was the markdown research briefing, currently empty for all runs
+- `ClusterView.tsx` — was the thematic cluster groupings, temporarily removed from Research tab
+- `WordAnalysisTable.tsx` — was the word analysis on Research tab, superseded by WordTable. Still available if needed elsewhere.
 
 ---
 
-## Transcript System
+## Sources System
 
-### Data Sources
-1. **Automatic**: Orchestrator caches transcript metadata after historical agent runs
-2. **Manual upload**: Users paste full transcript text via TranscriptsTab or Corpus page
+### Two Distinct Use Cases
 
-### Frequency Analysis
-The `/api/transcripts/frequencies` endpoint computes word mention rates across the corpus. Handles slash-separated word variants (e.g., "Deport / Deportation"). Excludes `"(metadata only)"` transcripts.
+**IMPORTANT architectural distinction** — the app has two completely separate use cases that must not be confused:
 
-### Word Highlighting
-`TranscriptViewer` highlights event words in transcript text using regex replacement with `<mark>` tags.
+1. **Research (tactical)** — The home page (`/`) + research dashboard (`/research/[eventId]`). The user pastes a specific upcoming Kalshi market URL, runs AI agents, and gets per-word probability estimates to decide what to buy. Sources come from agent results stored in `research_runs` JSONB columns. This is event-specific, short-lived analysis.
+
+2. **Corpus (strategic)** — The corpus page (`/corpus`). Long-term historical data on a speaker across all past events. Data comes from Kalshi's settled market results (ground truth yes/no outcomes). No AI analysis — purely settlement data from the Kalshi API. Used to identify word frequency patterns over time.
+
+These two systems share the `events` and `words` tables, but their data flows are completely separate:
+- Research events have `research_runs` rows. The home page only shows events with research runs.
+- Corpus events are imported via `POST /api/corpus/import-historical` and have `event_results` rows (settlement data). They appear on the corpus page, NOT on the home page.
+
+### Sources Tab (Research Dashboard)
+
+The Sources tab (`SourcesTab.tsx`) on the research dashboard shows every source the agents used, extracted from the latest completed research run:
+
+| Agent | Source Field | Source Type Tag |
+|-------|-------------|-----------------|
+| Historical | `historical_result.transcriptsFound[]` | `transcript` (blue) |
+| Agenda | `agenda_result.sourcesFound[]` | `agenda` (green) |
+| News Cycle | `news_cycle_result.trendingTopics[].sources[]` | `news` (amber) |
+| News Cycle | `news_cycle_result.recentSpeakerStatements[]` | `statement` (rose) |
+| Event Format | `event_format_result.comparableEvents[]` | `event` (purple) |
+| Market Analysis | _(none — pure price analysis, no web search)_ | — |
+
+The `extractSources()` function handles all extraction logic, normalizing different agent output shapes into a flat `ResearchSource[]` array.
+
+### Transcript Caching (Orchestrator)
+
+The orchestrator still caches transcript metadata in the `transcripts` table after historical agent runs (for future run optimization). This is an internal optimization — the `transcripts` table is NOT exposed on any user-facing page. The transcript API routes (`/api/transcripts/*`) still exist but are not used by any current UI.
 
 ---
 
@@ -927,7 +1011,7 @@ npm run build
 
 **First-time setup:**
 1. Create a Supabase project
-2. Run all four migrations (001-004) in order
+2. Run all six migrations (001-006) in order
 3. Get a Kalshi API key and RSA private key
 4. Get an Anthropic API key with Claude Opus 4 access
 5. Fill in `.env.local` with all credentials
@@ -936,11 +1020,11 @@ npm run build
 
 ## Two-Layer Research Model
 
-### Baseline Layer (Structural Edge)
-Run days before the event. Historical frequencies, agenda, event format, market structure. Does NOT run News Cycle agent.
+### Baseline Layer (Comprehensive)
+Run days before the event. Runs ALL 7 agents: historical frequencies, agenda, news cycle, event format, market analysis, clustering, and synthesis. The baseline should always be as comprehensive as possible.
 
-### Current Layer (Information Edge)
-Run hours before the event. Adds 72-hour news analysis. Reuses baseline results.
+### Current Layer (Refresh)
+Run hours before the event. Re-runs all agents with the latest data. Reuses baseline results as context (passed via `existingResearch` to the orchestrator). The purpose is to catch any material changes since the baseline was run.
 
 ---
 
@@ -955,19 +1039,20 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 ## Current Status & Known Issues
 
 ### What's Built and Working
-- Full 7-agent research pipeline with streaming progress
-- Markdown research briefing generation
-- Tabbed research dashboard (Research | Transcripts | Trade Log) with 17 components
-- Transcript corpus management (upload, browse, frequency analysis, word highlighting, download)
+- Full 7-agent research pipeline with streaming progress (all agents run on both layers)
+- Tabbed research dashboard (Research | Sources | Trade Log) with extracted components
+- **EventContext** — structured event context (format, duration, Q&A, agenda, exogenous events, likely topics, recent statements) surfaced from agent results
+- **WordTable** — corpus-integrated word analysis with manual speaker selection, historical rates from Kalshi settled market data (ground truth, 100+ event samples), expandable per-event detail, live WebSocket prices
+- **Sources tab** — aggregated sources from all agents with type tags (transcript, news, agenda, statement, event), clickable links to originals
+- **Home page** — only shows events with research runs (corpus-imported events excluded)
 - Live WebSocket price streaming via SSE proxy
 - Trade logging with inline forms
 - Automatic and manual settlement
-- Recharts analytics charts
+- Recharts analytics charts with expandable per-event trade detail, corpus-based historical mention rates and edge
 - Run cancellation
-- **Corpus page** with 4 tabs:
-  - Mention History: cross-event word mention rates with searchable, sortable, expandable per-event detail (827+ data points across 116 events). Word search filter, reset sort button.
-  - Transcript Library: standalone transcript management with search, upload, download
-  - Kalshi Markets: series management with searchable Kalshi API dropdown, per-series import/refresh, expandable events with word result tables
+- **Corpus page** with 3 tabs:
+  - Mention History: cross-event word mention rates with searchable, sortable, expandable per-event detail (827+ data points across 116 events). Word search filter, reset sort button. Data from Kalshi settled markets (ground truth).
+  - Kalshi Markets: series management with searchable Kalshi API dropdown, per-series import/refresh, expandable events with word result tables. Per-event removal with excluded_tickers tracking (removed events won't be re-imported on refresh). Event title filter for quickly finding/removing non-relevant events. Event titles hyperlinked to original Kalshi market pages for speaker verification. Supports multi-speaker series (e.g. KXCONGRESSMENTION) — import full series under a speaker, remove non-relevant events, refresh safely.
   - Quick Analysis: paste URL → live price vs historical rate comparison table with WebSocket updates, saved search list (localStorage), expandable per-event detail, edge detection, summary cards
 - Speaker → Series → Events data model (no fragile inference)
 - Historical data import from Kalshi API with pagination and deduplication
@@ -976,9 +1061,11 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - **Supabase 1000-row limit**: All queries returning potentially large result sets must paginate. The corpus APIs handle this, but any new API routes querying large tables should use `.range()` pagination.
 - **Agent-level retry**: Individual agent failures get fallback empty results, no automatic retry.
 - **Multiple concurrent research runs**: Untested.
-- **Baseline layer**: Has not been tested in production.
+- **Baseline layer**: One baseline run tested. News cycle agent now runs on both layers but baseline-specific results have limited production testing.
 - **Event types beyond speeches**: Only `address_to_congress` type events tested end-to-end with research.
 - **One empty event**: KXTRUMPMENTION has 1 event (a Press Conference) with 0 settled markets — this is a Kalshi data issue, not a bug.
+- **One missing result set**: KXTRUMPMENTIONB-25DEC03 has 20 words but 0 event_results (transient DB error during import). Re-import the series to fix.
+- **Analytics historical rates require speaker_id**: The analytics page only shows corpus historical mention rates for events where the user has explicitly set a speaker via the research page WordTable dropdown. Events without a `speaker_id` show "-" for Mention Rate and Edge columns.
 
 ### Architecture Improvements to Consider
 - Rate limiting for Claude API calls
@@ -1005,7 +1092,7 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - Full OpenAPI spec at `docs/kalshi-openapi.yaml`
 
 ### Supabase
-- All 4 migrations applied. **Default 1000-row limit** — always paginate large queries.
+- All 6 migrations applied. **Default 1000-row limit** — always paginate large queries.
 - Service role key bypasses RLS. Anon key respects RLS.
 - Management API at `POST https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query` for running SQL directly.
 
@@ -1092,4 +1179,92 @@ Both layers: ~$1.60 - $4.40. Failed runs still cost money.
 43. **Quick Analysis tab** — New 4th tab on the Corpus page. Paste a Kalshi mention market URL to compare live market prices against historical mention rates. Sortable comparison table (Word, Market Price, Historical Rate, Edge, Sample) with expandable per-event detail rows. Live WebSocket price updates via `useLivePrices` hook. Summary cards (Underpriced/Overpriced/Fair). Edge color-coding.
 44. **Quick Prices API** — `GET /api/corpus/quick-prices?url=` — lightweight read-only endpoint that fetches event + market prices from Kalshi REST API without writing to the database. Handles URL parsing, market-level ticker fallback, and filtering to active/open markets only.
 45. **Saved searches** — Quick Analysis searches are persisted in `localStorage` keyed by `kalshi-quick-analysis-{speakerId}`. Stored as `SavedSearch[]` with `{ url, eventTitle, eventTicker }`. Displayed as a clickable list — click to reload, "Remove" to delete. Auto-loads the first saved search on mount. Handles migration from older single-object format.
-46. **CorpusTabNav update** — `CorpusTab` type extended from 3 to 4 values (`"mentions" | "transcripts" | "markets" | "quick"`). Tab label: "Quick Analysis".
+46. **CorpusTabNav update** — `CorpusTab` type extended to include quick analysis. Tab label: "Quick Analysis".
+
+### Phase 6: Research/Corpus Separation & Sources System (Mar 2026)
+
+47. **Home page filter** — `/api/events/list` now queries `research_runs` first and only returns events that have at least one research run. Corpus-imported events (no research) are excluded. Label changed from "Previous Events" to "Researched Events".
+48. **Sources tab** — Renamed "Transcripts" tab to "Sources" on the research dashboard. `TranscriptsTab` replaced by `SourcesTab` which aggregates all sources from every research agent (historical transcripts, agenda sources, news articles, speaker statements, comparable events). Each source has a type tag with color-coding. `extractSources()` helper extracts sources from all 4 agent result JSONB columns. `TabId` type updated from `"transcripts"` to `"sources"`.
+49. **Corpus transcript tab removed** — Removed the "Transcript Library" tab from the corpus page entirely. The corpus page now has 3 tabs (Mention History | Kalshi Markets | Quick Analysis). Corpus data comes exclusively from Kalshi settled market results, not transcripts. `CorpusTab` type updated from 4 to 3 values (`"mentions" | "markets" | "quick"`). All transcript-related state, fetching, and components removed from corpus page.
+50. **Research/Corpus conceptual split** — Established clear architectural separation: Research page = tactical (AI agents analyze a specific upcoming event), Corpus page = strategic (historical Kalshi settlement data across all past events for a speaker). The two share DB tables but have completely independent data flows and UI.
+
+### Phase 7: Research Dashboard Overhaul — Event Context & Corpus Integration (Mar 2026)
+
+51. **EventContext component** — New `src/components/research/EventContext.tsx` replacing both `ResearchBriefing` and `ClusterView` on the Research tab. Surfaces structured event context directly from agent results (previously buried in JSONB). Two sections:
+   - **Event Structure**: Format, duration + range, Q&A, live status, agent explanation, trading weight footer (Historical weight %, Current context weight %, Word count expectation). Data from `EventFormatResult`.
+   - **Event Analysis**: Breaking news alert, Agenda & Purpose with advance sources, Exogenous Events sorted by relevance with speaker framing, Recent Speaker Statements, Likely Topics sorted by likelihood with evidence and related market words. Data from `AgendaResult` + `NewsCycleResult`.
+   - Props: `{ eventFormat: EventFormatResult | null; agenda: AgendaResult | null; newsCycle: NewsCycleResult | null }`.
+
+52. **WordTable component** — New `src/components/research/WordTable.tsx` replacing `WordAnalysisTable` on the Research tab. Matches the QuickAnalysis-style layout from the corpus page. Key differences from the old table:
+   - Historical rates come exclusively from corpus settled market data (ground truth, 100+ event samples), NOT from the agent's web-scraped transcripts (~9 transcripts).
+   - Manual speaker selector dropdown at the top — user selects which speaker's corpus data to cross-reference.
+   - Columns: Word, Market Price (live via WebSocket), Historical Rate (color-coded badge), Edge (rate - price), Sample (yes/total).
+   - Expandable rows showing per-event detail from corpus `MentionEventDetail[]`.
+   - No cluster filters, no agent confidence columns, no summary cards.
+   - Props include: `wordScores`, `livePrices`, `mentionData: MentionHistoryRow[]`, `speakers`, `selectedSpeakerId`, `onSpeakerChange`.
+
+53. **Research page corpus integration** — `src/app/research/[eventId]/page.tsx` now fetches corpus data:
+   - Added state: `speakers`, `selectedSpeakerId`, `mentionData`, `mentionLoading`.
+   - Fetches speaker list from `GET /api/corpus/speakers` on mount.
+   - Fetches mention history from `GET /api/corpus/mention-history?speakerId=X` when speaker changes.
+   - **Speaker selection persists to DB**: When the user selects a speaker in the WordTable dropdown, it calls `PATCH /api/events/speaker` to save `speaker_id` on the event. On page load, `selectedSpeakerId` is restored from the event's `speaker_id` field, so the selection survives page reloads.
+   - Speaker selection is manual (never automatic) — the user explicitly chooses which speaker's historical data to use. The `speaker_id` on the event record is the ONLY way analytics knows which corpus data to pull.
+   - Research tab render order: `EventContext` → `WordTable` → `AgentOutputAccordion`.
+
+54. **News Cycle agent on both layers** — Removed the `if (input.layer === "current")` guard in `src/agents/orchestrator.ts`. The News Cycle agent now runs on both baseline and current layers. Rationale: baseline should always be as comprehensive as possible; the current layer is a refresh, not the only place for news analysis.
+
+55. **Removed components from Research tab** — `ResearchBriefing`, `ClusterView`, and `WordAnalysisTable` are no longer rendered on the Research tab. Files are kept in the codebase (not deleted) for potential future repurposing. `ResearchBriefing` was always empty (no runs produced a briefing). `ClusterView` will return in a future iteration. `WordAnalysisTable` is superseded by `WordTable` but `WordScoresTable` (different component) is still used on the Trade Log tab.
+
+### Phase 8: Speaker Persistence & Analytics Overhaul (Mar 2026)
+
+56. **Migration 005: events.speaker_id** — New `speaker_id` UUID FK column on `events` table referencing `speakers(id)` with `ON DELETE SET NULL`. Indexed for query performance. This provides a robust, explicit link from any event to a speaker — never inferred, always set manually by the user.
+
+57. **Speaker persistence API** — New `PATCH /api/events/speaker` endpoint (`src/app/api/events/speaker/route.ts`). Accepts `{ eventId, speakerId }` and updates `events.speaker_id`. Used by the research page to persist speaker selection.
+
+58. **Research page speaker persistence** — When the user selects a speaker in the WordTable dropdown on the research page, it now:
+   - Calls `PATCH /api/events/speaker` to save the selection to the event record
+   - On page load, restores `selectedSpeakerId` from the event's existing `speaker_id` field
+   - This means the speaker selection survives page reloads and is available to the analytics API
+
+59. **Analytics: traded events only** — `GET /api/analytics/performance` now filters to only events with at least one trade. Uses `tradedEventIds` from the trades table and queries events with `.in("id", tradedEventIds)`. Corpus-imported events with no trades are excluded.
+
+60. **Analytics: expandable trade detail** — Per-event rows in the analytics table are now clickable to expand/collapse. Each expanded row shows a sub-table of individual trades with columns: Word, Side (YES/NO pill), Entry Price, Contracts, Mention Rate, Edge, Result (W/L), P&L.
+
+61. **Analytics: corpus historical mention rates** — The analytics API now computes real historical mention rates from the corpus (Kalshi settled market data), replacing the AI synthesizer's `combined_probability` estimates. Data flow:
+   - For each unique `speaker_id` across traded events, fetches all series for that speaker
+   - Queries all corpus events in those series, then fetches `event_results` joined with `words` (paginated in 1000-row chunks to avoid Supabase limit)
+   - Groups by normalized word name (case-insensitive) to compute `mentionRate = mentioned / total`
+   - Per trade: `historicalRate = rateMap.get(wordName.toLowerCase())`, `historicalEdge = historicalRate - entryPrice`
+   - Frontend displays `historicalRate` and `historicalEdge` instead of `agentProbability` and `agentEdge`
+
+62. **KXTRUMPMENTIONB series imported** — Added 57 events from the KXTRUMPMENTIONB Kalshi series to the corpus. Also added KXBUSINESSROUNDTABLE (1 event). Total corpus: 3 series, 172 events. One known issue: KXTRUMPMENTIONB-25DEC03 has 0 event_results due to a transient DB error during import (fixable by re-importing).
+
+63. **Agent estimate vs corpus rate distinction** — Established clear terminology:
+   - `agentProbability` / `agentEdge` = AI synthesizer's weighted estimate (historical + agenda + news + base_rate), stored in `word_scores` and snapshotted to `trades` at trade time. These are the model's predictions.
+   - `historicalRate` / `historicalEdge` = actual corpus mention rate from Kalshi settled market data (ground truth). Computed at analytics query time from `event_results`. These are empirical frequencies.
+   - Analytics now uses corpus rates (ground truth) for display. The agent estimates are still stored on trades for future calibration analysis.
+
+### Phase 9: Multi-Speaker Series Support (Mar 2026)
+
+64. **Migration 006: `excluded_tickers`** — Adds `excluded_tickers TEXT[] DEFAULT '{}'` column to the `series` table. Tracks event tickers the user has manually removed from a series so they are never re-imported on refresh. Applied to live Supabase database.
+
+65. **Per-event removal from series** — New `DELETE` handler on `GET /api/corpus/series/events` (`src/app/api/corpus/series/events/route.ts`). Accepts `?eventId=<uuid>&seriesId=<uuid>`. Cascade-deletes the event and all dependent records (`event_results` → `word_scores` → `trades` → `words` → `word_clusters` → `research_runs` → `events`), appends the event's Kalshi ticker to the series `excluded_tickers` array, and recounts `events_count` / `words_count` on the series. No confirmation dialog — immediate deletion for fast bulk cleanup.
+
+66. **Excluded tickers filtering on import** — `src/app/api/corpus/import-historical/route.ts` now reads `excluded_tickers` from the series record. After fetching all settled events from the Kalshi API, filters out any whose ticker is in the `excluded_tickers` set before processing. Uses DB-based recount for accurate `events_count` / `words_count` stats (instead of counting only newly imported events). Response includes `eventsSkipped` count.
+
+67. **Event filter in KalshiMarketsTab** — When a series is expanded, a text filter input appears above the events list. Filters events by title (case-insensitive substring match). Shows "Showing X of Y events" counter when active. Resets on collapse or series switch. Critical for multi-speaker series like KXCONGRESSMENTION where you need to quickly identify and remove non-relevant speaker events.
+
+68. **Per-event remove button** — Each event row in the expanded series list has a small "x" button on the right side. Clicking it immediately calls the DELETE API (no confirmation dialog) and refreshes the events list. Loading state shown during removal. This enables fast bulk cleanup of multi-speaker series.
+
+69. **Event title hyperlinks to Kalshi** — Event titles in the expanded series view are now hyperlinked to the original Kalshi market page. URL constructed as `https://kalshi.com/markets/{series_ticker}/{event_ticker}` (both lowercased, series ticker extracted by stripping the date suffix). Opens in new tab. Falls back to plain text if `eventTicker` is missing (e.g. for cached events loaded before the API change). Enables speaker verification for events with ambiguous titles like "Mention: Oversight hearing on ICE".
+
+70. **Multi-speaker series workflow** — Established a complete workflow for speakers who don't have their own dedicated Kalshi series (e.g. Kristie Noem with KXCONGRESSMENTION):
+    1. Add the speaker on the corpus page (e.g. "Kristie Noem")
+    2. Add the shared series (e.g. KXCONGRESSMENTION) under that speaker
+    3. Click Refresh to import all settled events from the series
+    4. Use the event filter to find non-relevant events (other speakers' sessions)
+    5. Click the "x" button to remove them — their tickers go into `excluded_tickers`
+    6. On future refreshes, excluded events are skipped — only new, non-excluded events are imported
+    7. The mention history and quick analysis tabs then show data only for the remaining (speaker-relevant) events
+
+    **Important limitation**: Corpus import only fetches `status: "settled"` events from Kalshi. Upcoming/active events (like a hearing happening today) won't appear in corpus imports. For upcoming events, use the home page URL input to load them for research — the corpus provides historical context, not live event loading.

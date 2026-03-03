@@ -14,20 +14,25 @@ import type {
   SortKey,
   TabId,
 } from "@/types/components";
-import type { ClusterResult, SynthesisResult } from "@/types/research";
+import type {
+  HistoricalResult,
+  AgendaResult,
+  NewsCycleResult,
+  EventFormatResult,
+} from "@/types/research";
+import type { MentionHistoryRow } from "@/types/corpus";
 
 import { EventHeader } from "@/components/research/EventHeader";
 import { ProgressMessages } from "@/components/research/ProgressMessages";
 import { TabNavigation } from "@/components/research/TabNavigation";
-import { ResearchBriefing } from "@/components/research/ResearchBriefing";
-import { ClusterView } from "@/components/research/ClusterView";
-import { WordAnalysisTable } from "@/components/research/WordAnalysisTable";
+import { EventContext } from "@/components/research/EventContext";
+import { WordTable } from "@/components/research/WordTable";
 import { AgentOutputAccordion } from "@/components/research/AgentOutputAccordion";
 import { WordScoresTable } from "@/components/research/WordScoresTable";
 import { LoggedTrades } from "@/components/research/LoggedTrades";
 import { ResolveEvent } from "@/components/research/ResolveEvent";
 import { RunHistory } from "@/components/research/RunHistory";
-import { TranscriptsTab } from "@/components/research/TranscriptsTab";
+import { SourcesTab, extractSources } from "@/components/research/SourcesTab";
 
 export default function ResearchDashboard({
   params,
@@ -44,11 +49,16 @@ export default function ResearchDashboard({
   const [researchSummary, setResearchSummary] = useState<ResearchSummary | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // ── Corpus speaker state ──
+  const [speakers, setSpeakers] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState<string>("");
+  const [mentionData, setMentionData] = useState<MentionHistoryRow[]>([]);
+  const [mentionLoading, setMentionLoading] = useState(false);
+
   // ── UI state ──
   const [activeTab, setActiveTab] = useState<TabId>("research");
   const [sortKey, setSortKey] = useState<SortKey>("edge");
   const [sortAsc, setSortAsc] = useState(false);
-  const [expandedWord, setExpandedWord] = useState<string | null>(null);
   const [researchRunning, setResearchRunning] = useState(false);
   const [progressMessages, setProgressMessages] = useState<string[]>([]);
   const [filterCluster, setFilterCluster] = useState<string>("all");
@@ -83,12 +93,24 @@ export default function ResearchDashboard({
 
   // ── Derived values ──
   const latestCompletedRun = runs.find((r) => r.status === "completed") ?? null;
-  const clusterResult = (latestCompletedRun?.cluster_result as ClusterResult) ?? null;
-  const synthesisResult = (latestCompletedRun?.synthesis_result as SynthesisResult) ?? null;
-  const briefing = (latestCompletedRun?.briefing) ?? null;
+  const eventFormatResult = (latestCompletedRun?.event_format_result as EventFormatResult) ?? null;
+  const agendaResult = (latestCompletedRun?.agenda_result as AgendaResult) ?? null;
+  const newsCycleResult = (latestCompletedRun?.news_cycle_result as NewsCycleResult) ?? null;
   const hasBaseline = runs.some((r) => r.layer === "baseline" && r.status === "completed");
   const hasCurrent = runs.some((r) => r.layer === "current" && r.status === "completed");
   const isResolved = eventResults.length > 0;
+
+  // Extract all sources from the latest completed research run
+  const researchSources = useMemo(() => {
+    if (!latestCompletedRun) return [];
+    return extractSources(
+      (latestCompletedRun.historical_result as HistoricalResult) ?? null,
+      (latestCompletedRun.agenda_result as AgendaResult) ?? null,
+      (latestCompletedRun.news_cycle_result as NewsCycleResult) ?? null,
+      (latestCompletedRun.event_format_result as EventFormatResult) ?? null
+    );
+  }, [latestCompletedRun]);
+  const sourceCount = researchSources.length;
 
   // ── Data fetching ──
   const fetchData = useCallback(async () => {
@@ -103,6 +125,10 @@ export default function ResearchDashboard({
       setResearchSummary(data.researchSummary);
       setTrades(data.trades ?? []);
       setWords(data.words ?? []);
+      // Restore persisted speaker selection
+      if (data.event?.speaker_id && !selectedSpeakerId) {
+        setSelectedSpeakerId(data.event.speaker_id);
+      }
       if (data.eventResults?.length > 0) {
         setEventResults(data.eventResults);
         const resultsMap: Record<string, boolean> = {};
@@ -121,6 +147,42 @@ export default function ResearchDashboard({
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // ── Corpus speaker fetching ──
+  useEffect(() => {
+    async function fetchSpeakers() {
+      try {
+        const res = await fetch("/api/corpus/speakers");
+        const data = await res.json();
+        setSpeakers(data.speakers ?? []);
+      } catch {
+        // silently fail
+      }
+    }
+    fetchSpeakers();
+  }, []);
+
+  const fetchMentionHistory = useCallback(async () => {
+    if (!selectedSpeakerId) {
+      setMentionData([]);
+      return;
+    }
+    setMentionLoading(true);
+    try {
+      const params = new URLSearchParams({ speakerId: selectedSpeakerId });
+      const res = await fetch(`/api/corpus/mention-history?${params}`);
+      const data = await res.json();
+      setMentionData(data.rows ?? []);
+    } catch {
+      setMentionData([]);
+    } finally {
+      setMentionLoading(false);
+    }
+  }, [selectedSpeakerId]);
+
+  useEffect(() => {
+    fetchMentionHistory();
+  }, [fetchMentionHistory]);
 
   // ── Callbacks ──
   async function triggerResearch(layer: "baseline" | "current") {
@@ -309,10 +371,6 @@ export default function ResearchDashboard({
     );
   }
 
-  // Transcript count from runs' cached transcripts
-  const transcriptCount = (latestCompletedRun?.historical_result as { transcriptsFound?: unknown[] } | null)
-    ?.transcriptsFound?.length ?? 0;
-
   return (
     <div className="space-y-6">
       {/* Always visible: Header + Progress */}
@@ -334,49 +392,43 @@ export default function ResearchDashboard({
         activeTab={activeTab}
         onTabChange={setActiveTab}
         tradeCount={trades.length}
-        transcriptCount={transcriptCount}
+        sourceCount={sourceCount}
       />
 
       {/* ── Research Tab ── */}
       {activeTab === "research" && (
         <div className="space-y-6">
-          <ResearchBriefing
-            briefing={briefing}
-            researchQuality={synthesisResult?.researchQuality ?? null}
-            runTimestamp={latestCompletedRun?.completed_at}
-            layer={latestCompletedRun?.layer}
+          <EventContext
+            eventFormat={eventFormatResult}
+            agenda={agendaResult}
+            newsCycle={newsCycleResult}
           />
 
-          <ClusterView
-            clusters={clusters}
-            clusterResult={clusterResult}
+          <WordTable
             wordScores={wordScores}
-          />
-
-          <WordAnalysisTable
-            wordScores={wordScores}
-            clusters={clusters}
             livePrices={livePrices}
-            filterCluster={filterCluster}
-            onFilterClusterChange={setFilterCluster}
-            sortKey={sortKey}
-            sortAsc={sortAsc}
-            onSort={handleSort}
-            expandedWord={expandedWord}
-            onExpandWord={setExpandedWord}
-            researchRunning={researchRunning}
+            mentionData={mentionData}
+            mentionLoading={mentionLoading}
+            speakers={speakers}
+            selectedSpeakerId={selectedSpeakerId}
+            onSpeakerChange={(speakerId: string) => {
+              setSelectedSpeakerId(speakerId);
+              // Persist speaker selection to event record
+              fetch("/api/events/speaker", {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ eventId, speakerId: speakerId || null }),
+              }).catch(() => {});
+            }}
           />
 
           <AgentOutputAccordion researchSummary={researchSummary} />
         </div>
       )}
 
-      {/* ── Transcripts Tab ── */}
-      {activeTab === "transcripts" && (
-        <TranscriptsTab
-          speaker={event.speaker}
-          eventWords={words.map((w) => w.word)}
-        />
+      {/* ── Sources Tab ── */}
+      {activeTab === "sources" && (
+        <SourcesTab sources={researchSources} />
       )}
 
       {/* ── Trade Log Tab ── */}

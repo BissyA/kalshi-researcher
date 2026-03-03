@@ -4,12 +4,12 @@ interface TabNavigationProps {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
   tradeCount: number;
-  transcriptCount: number;
+  sourceCount: number;
 }
 
 const tabs: Array<{ id: TabId; label: string; icon: string }> = [
   { id: "research", label: "Research", icon: "📋" },
-  { id: "transcripts", label: "Transcripts", icon: "📚" },
+  { id: "sources", label: "Sources", icon: "📎" },
   { id: "tradelog", label: "Trade Log", icon: "📊" },
 ];
 
@@ -17,7 +17,7 @@ export function TabNavigation({
   activeTab,
   onTabChange,
   tradeCount,
-  transcriptCount,
+  sourceCount,
 }: TabNavigationProps) {
   return (
     <div className="border-b border-zinc-800">
@@ -27,8 +27,8 @@ export function TabNavigation({
           const badge =
             tab.id === "tradelog" && tradeCount > 0
               ? tradeCount
-              : tab.id === "transcripts" && transcriptCount > 0
-                ? transcriptCount
+              : tab.id === "sources" && sourceCount > 0
+                ? sourceCount
                 : null;
 
           return (

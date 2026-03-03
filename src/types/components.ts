@@ -99,7 +99,7 @@ export interface EventResult {
 // ── UI Types ──
 
 export type SortKey = "word" | "combined" | "edge" | "market" | "confidence";
-export type TabId = "research" | "transcripts" | "tradelog";
+export type TabId = "research" | "sources" | "tradelog";
 
 // ── Live Prices ──
 

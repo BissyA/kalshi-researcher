@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import {
   BarChart,
   Bar,
@@ -23,6 +23,19 @@ interface OverallStats {
   totalPnlDollars: string;
 }
 
+interface TradeDetail {
+  word: string;
+  side: string;
+  entryPrice: number;
+  contracts: number;
+  result: string | null;
+  pnlCents: number;
+  agentEdge: number | null;
+  agentProbability: number | null;
+  historicalRate: number | null;
+  historicalEdge: number | null;
+}
+
 interface EventPerf {
   eventId: string;
   title: string;
@@ -33,6 +46,7 @@ interface EventPerf {
   losses: number;
   winRate: number;
   pnlCents: number;
+  trades: TradeDetail[];
 }
 
 interface CalibrationBucket {
@@ -71,6 +85,7 @@ export default function AnalyticsPage() {
     []
   );
   const [edgeAnalysis, setEdgeAnalysis] = useState<EdgeBucket[]>([]);
+  const [expandedEvents, setExpandedEvents] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -191,6 +206,7 @@ export default function AnalyticsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-zinc-900 border-b border-zinc-800">
+                  <th className="w-8 px-2 py-3" />
                   <th className="px-4 py-3 text-left text-zinc-400 font-medium">
                     Event
                   </th>
@@ -212,37 +228,174 @@ export default function AnalyticsPage() {
                 </tr>
               </thead>
               <tbody>
-                {eventPerformance.map((ep) => (
-                  <tr
-                    key={ep.eventId}
-                    className="border-b border-zinc-800/50"
-                  >
-                    <td className="px-4 py-3 text-white">{ep.title}</td>
-                    <td className="px-4 py-3 text-zinc-400">
-                      {ep.eventDate
-                        ? new Date(ep.eventDate).toLocaleDateString()
-                        : "-"}
-                    </td>
-                    <td className="px-4 py-3 text-zinc-400">
-                      {ep.totalTrades}
-                    </td>
-                    <td className="px-4 py-3 text-zinc-400">
-                      {ep.wins}/{ep.losses}
-                    </td>
-                    <td className="px-4 py-3 text-zinc-400">
-                      {ep.totalTrades > 0
-                        ? `${Math.round(ep.winRate * 100)}%`
-                        : "-"}
-                    </td>
-                    <td
-                      className={`px-4 py-3 font-mono ${
-                        ep.pnlCents >= 0 ? "text-green-400" : "text-red-400"
-                      }`}
-                    >
-                      ${(ep.pnlCents / 100).toFixed(2)}
-                    </td>
-                  </tr>
-                ))}
+                {eventPerformance.map((ep) => {
+                  const isExpanded = expandedEvents.has(ep.eventId);
+                  return (
+                    <React.Fragment key={ep.eventId}>
+                      <tr
+                        className="border-b border-zinc-800/50 cursor-pointer hover:bg-zinc-800/30 transition-colors"
+                        onClick={() => {
+                          setExpandedEvents((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(ep.eventId)) next.delete(ep.eventId);
+                            else next.add(ep.eventId);
+                            return next;
+                          });
+                        }}
+                      >
+                        <td className="px-2 py-3 text-zinc-500 text-center">
+                          <span
+                            className="inline-block transition-transform duration-200"
+                            style={{
+                              transform: isExpanded
+                                ? "rotate(90deg)"
+                                : "rotate(0deg)",
+                            }}
+                          >
+                            &#9654;
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-white">{ep.title}</td>
+                        <td className="px-4 py-3 text-zinc-400">
+                          {ep.eventDate
+                            ? new Date(ep.eventDate).toLocaleDateString()
+                            : "-"}
+                        </td>
+                        <td className="px-4 py-3 text-zinc-400">
+                          {ep.totalTrades}
+                        </td>
+                        <td className="px-4 py-3 text-zinc-400">
+                          {ep.wins}/{ep.losses}
+                        </td>
+                        <td className="px-4 py-3 text-zinc-400">
+                          {ep.totalTrades > 0
+                            ? `${Math.round(ep.winRate * 100)}%`
+                            : "-"}
+                        </td>
+                        <td
+                          className={`px-4 py-3 font-mono ${
+                            ep.pnlCents >= 0
+                              ? "text-green-400"
+                              : "text-red-400"
+                          }`}
+                        >
+                          ${(ep.pnlCents / 100).toFixed(2)}
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr>
+                          <td colSpan={8} className="p-0">
+                            <div className="bg-zinc-950 border-t border-zinc-800/50 px-8 py-3">
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="text-zinc-500">
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      Word
+                                    </th>
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      Side
+                                    </th>
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      Entry Price
+                                    </th>
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      Contracts
+                                    </th>
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      Mention Rate
+                                    </th>
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      Edge
+                                    </th>
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      Result
+                                    </th>
+                                    <th className="px-3 py-2 text-left font-medium">
+                                      P&L
+                                    </th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {ep.trades.map((t, i) => (
+                                    <tr
+                                      key={i}
+                                      className="border-t border-zinc-800/30"
+                                    >
+                                      <td className="px-3 py-2 text-zinc-300">
+                                        {t.word}
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <span
+                                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                                            t.side === "yes"
+                                              ? "bg-green-900/40 text-green-400"
+                                              : "bg-red-900/40 text-red-400"
+                                          }`}
+                                        >
+                                          {t.side}
+                                        </span>
+                                      </td>
+                                      <td className="px-3 py-2 text-zinc-400 font-mono">
+                                        {t.entryPrice.toFixed(2)}
+                                      </td>
+                                      <td className="px-3 py-2 text-zinc-400">
+                                        {t.contracts}
+                                      </td>
+                                      <td className="px-3 py-2 text-zinc-400 font-mono">
+                                        {t.historicalRate != null
+                                          ? `${Math.round(t.historicalRate * 100)}%`
+                                          : "-"}
+                                      </td>
+                                      <td
+                                        className={`px-3 py-2 font-mono ${
+                                          t.historicalEdge != null && t.historicalEdge >= 0
+                                            ? "text-green-400"
+                                            : t.historicalEdge != null
+                                              ? "text-red-400"
+                                              : "text-zinc-400"
+                                        }`}
+                                      >
+                                        {t.historicalEdge != null
+                                          ? `${t.historicalEdge >= 0 ? "+" : ""}${(t.historicalEdge * 100).toFixed(1)}%`
+                                          : "-"}
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        {t.result ? (
+                                          <span
+                                            className={
+                                              t.result === "win"
+                                                ? "text-green-400"
+                                                : "text-red-400"
+                                            }
+                                          >
+                                            {t.result === "win" ? "W" : "L"}
+                                          </span>
+                                        ) : (
+                                          <span className="text-zinc-600">
+                                            -
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td
+                                        className={`px-3 py-2 font-mono ${
+                                          t.pnlCents >= 0
+                                            ? "text-green-400"
+                                            : "text-red-400"
+                                        }`}
+                                      >
+                                        ${(t.pnlCents / 100).toFixed(2)}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

@@ -5,30 +5,13 @@ import { SpeakerSelector } from "@/components/corpus/SpeakerSelector";
 import { CorpusTabNav, type CorpusTab } from "@/components/corpus/CorpusTabNav";
 import { MentionSummaryStats } from "@/components/corpus/MentionSummaryStats";
 import { MentionHistoryTable } from "@/components/corpus/MentionHistoryTable";
-import { TranscriptSearchBar } from "@/components/corpus/TranscriptSearchBar";
 import { KalshiMarketsTab } from "@/components/corpus/KalshiMarketsTab";
 import { QuickAnalysisTab } from "@/components/corpus/QuickAnalysisTab";
-import { CorpusStats } from "@/components/research/CorpusStats";
-import { TranscriptList } from "@/components/research/TranscriptList";
-import { TranscriptViewer } from "@/components/research/TranscriptViewer";
-import { TranscriptUpload } from "@/components/research/TranscriptUpload";
 import type { MentionHistoryRow, SeriesWithStats } from "@/types/corpus";
 
 interface Speaker {
   id: string;
   name: string;
-}
-
-interface Transcript {
-  id: string;
-  speaker: string;
-  event_type: string | null;
-  event_date: string | null;
-  title: string | null;
-  source_url: string | null;
-  full_text: string;
-  word_count: number | null;
-  created_at: string;
 }
 
 export default function CorpusPage() {
@@ -41,14 +24,6 @@ export default function CorpusPage() {
   const [mentionData, setMentionData] = useState<MentionHistoryRow[]>([]);
   const [mentionLoading, setMentionLoading] = useState(true);
   const [totalSettledEvents, setTotalSettledEvents] = useState(0);
-
-  // Transcript state
-  const [transcripts, setTranscripts] = useState<Transcript[]>([]);
-  const [transcriptTotal, setTranscriptTotal] = useState(0);
-  const [transcriptLoading, setTranscriptLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
-  const [showUpload, setShowUpload] = useState(false);
 
   // Series state (for Kalshi Markets tab)
   const [series, setSeries] = useState<SeriesWithStats[]>([]);
@@ -93,28 +68,6 @@ export default function CorpusPage() {
     fetchMentionHistory();
   }, [fetchMentionHistory]);
 
-  // Fetch transcripts when speaker or search changes
-  const fetchTranscripts = useCallback(async () => {
-    setTranscriptLoading(true);
-    try {
-      const params = new URLSearchParams({ limit: "200" });
-      if (selectedSpeaker) params.set("speaker", selectedSpeaker.name);
-      if (searchQuery) params.set("q", searchQuery);
-      const res = await fetch(`/api/transcripts?${params}`);
-      const data = await res.json();
-      setTranscripts(data.transcripts ?? []);
-      setTranscriptTotal(data.total ?? 0);
-    } catch {
-      setTranscripts([]);
-    } finally {
-      setTranscriptLoading(false);
-    }
-  }, [selectedSpeaker, searchQuery]);
-
-  useEffect(() => {
-    fetchTranscripts();
-  }, [fetchTranscripts]);
-
   // Fetch series for selected speaker
   const fetchSeries = useCallback(async () => {
     if (!selectedSpeakerId) {
@@ -147,7 +100,6 @@ export default function CorpusPage() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     await fetchSpeakers();
-    // Auto-select the new speaker
     setSelectedSpeakerId(data.speaker.id);
   }
 
@@ -174,6 +126,17 @@ export default function CorpusPage() {
     await fetchMentionHistory();
   }
 
+  async function handleRemoveEvent(eventId: string, seriesId: string) {
+    const res = await fetch(
+      `/api/corpus/series/events?eventId=${eventId}&seriesId=${seriesId}`,
+      { method: "DELETE" }
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    await fetchSeries();
+    await fetchMentionHistory();
+  }
+
   async function handleImportSeries(seriesId: string) {
     const res = await fetch("/api/corpus/import-historical", {
       method: "POST",
@@ -182,7 +145,6 @@ export default function CorpusPage() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
-    // Refresh both series stats and mention history after import
     await fetchSeries();
     await fetchMentionHistory();
     return {
@@ -191,12 +153,6 @@ export default function CorpusPage() {
       resultsImported: data.resultsImported ?? 0,
       errors: data.errors ?? [],
     };
-  }
-
-  async function handleDeleteTranscript(id: string) {
-    await fetch(`/api/transcripts/${id}`, { method: "DELETE" });
-    setSelectedTranscript(null);
-    fetchTranscripts();
   }
 
   // Computed values
@@ -209,19 +165,6 @@ export default function CorpusPage() {
       ? [...mentionData].sort((a, b) => b.mentionRate - a.mentionRate)[0]?.word ?? null
       : null;
 
-  const totalTranscriptWords = transcripts.reduce(
-    (sum, t) => sum + (t.word_count ?? 0),
-    0
-  );
-  const dates = transcripts
-    .map((t) => t.event_date)
-    .filter(Boolean)
-    .sort() as string[];
-  const dateRange =
-    dates.length > 0
-      ? { earliest: dates[0], latest: dates[dates.length - 1] }
-      : null;
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -229,7 +172,7 @@ export default function CorpusPage() {
         <div>
           <h1 className="text-2xl font-bold text-white">Corpus</h1>
           <p className="text-sm text-zinc-500 mt-1">
-            Word mention history, transcript library, and Kalshi market management
+            Word mention history and Kalshi market management
           </p>
         </div>
         <SpeakerSelector
@@ -245,7 +188,6 @@ export default function CorpusPage() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         mentionCount={mentionData.length}
-        transcriptCount={transcriptTotal}
         seriesCount={series.length}
       />
 
@@ -262,65 +204,6 @@ export default function CorpusPage() {
         </div>
       )}
 
-      {/* Transcript Library Tab */}
-      {activeTab === "transcripts" && (
-        <div className="space-y-4">
-          <CorpusStats
-            totalTranscripts={transcriptTotal}
-            totalWords={totalTranscriptWords}
-            speaker={selectedSpeaker?.name || "All"}
-            dateRange={dateRange}
-          />
-
-          <div className="flex items-center gap-3">
-            <div className="flex-1">
-              <TranscriptSearchBar
-                value={searchQuery}
-                onChange={setSearchQuery}
-              />
-            </div>
-            <button
-              onClick={() => setShowUpload(!showUpload)}
-              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white text-sm rounded-lg transition-colors"
-            >
-              {showUpload ? "Hide Upload" : "Upload Transcript"}
-            </button>
-          </div>
-
-          {showUpload && (
-            <TranscriptUpload
-              defaultSpeaker={selectedSpeaker?.name || ""}
-              onUploadComplete={() => {
-                setShowUpload(false);
-                fetchTranscripts();
-              }}
-            />
-          )}
-
-          {selectedTranscript && (
-            <TranscriptViewer
-              transcript={selectedTranscript}
-              onClose={() => setSelectedTranscript(null)}
-            />
-          )}
-
-          {transcriptLoading ? (
-            <div className="border border-zinc-800 rounded-lg bg-zinc-900/30 p-8 text-center">
-              <p className="text-zinc-400 text-sm">Loading transcripts...</p>
-            </div>
-          ) : (
-            <TranscriptList
-              transcripts={transcripts}
-              selectedId={selectedTranscript?.id ?? null}
-              onSelect={setSelectedTranscript}
-              onDelete={handleDeleteTranscript}
-              eventWords={[]}
-              showDownload
-            />
-          )}
-        </div>
-      )}
-
       {/* Kalshi Markets Tab */}
       {activeTab === "markets" && (
         <KalshiMarketsTab
@@ -331,6 +214,7 @@ export default function CorpusPage() {
           onAddSeries={handleAddSeries}
           onDeleteSeries={handleDeleteSeries}
           onImportSeries={handleImportSeries}
+          onRemoveEvent={handleRemoveEvent}
         />
       )}
 

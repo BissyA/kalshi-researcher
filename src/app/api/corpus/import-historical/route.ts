@@ -36,7 +36,7 @@ export async function POST(request: Request) {
     // Look up the series record to get the ticker and speaker
     const { data: series, error: seriesError } = await supabase
       .from("series")
-      .select("id, series_ticker, speaker_id, speakers!inner(name)")
+      .select("id, series_ticker, speaker_id, excluded_tickers, speakers!inner(name)")
       .eq("id", seriesId)
       .single();
 
@@ -93,7 +93,15 @@ export async function POST(request: Request) {
       });
     }
 
-    for (const kalshiEvent of allEvents) {
+    // Filter out events the user previously removed from this series
+    const excludedTickers = new Set<string>(
+      (series.excluded_tickers as string[] | null) ?? []
+    );
+    const eventsToProcess = allEvents.filter(
+      (e) => !excludedTickers.has(e.event_ticker)
+    );
+
+    for (const kalshiEvent of eventsToProcess) {
       try {
         let markets = kalshiEvent.markets ?? [];
 
@@ -232,22 +240,45 @@ export async function POST(request: Request) {
       }
     }
 
-    // Update series stats
+    // Recount actual events and words in DB for accurate stats
+    const { count: actualEventsCount } = await supabase
+      .from("events")
+      .select("*", { count: "exact", head: true })
+      .eq("series_id", seriesId);
+
+    const { data: eventIdsForCount } = await supabase
+      .from("events")
+      .select("id")
+      .eq("series_id", seriesId);
+
+    let actualWordsCount = 0;
+    if (eventIdsForCount && eventIdsForCount.length > 0) {
+      const { count } = await supabase
+        .from("words")
+        .select("*", { count: "exact", head: true })
+        .in("event_id", eventIdsForCount.map((e) => e.id));
+      actualWordsCount = count ?? 0;
+    }
+
     await supabase
       .from("series")
       .update({
-        events_count: eventsImported,
-        words_count: wordsImported,
+        events_count: actualEventsCount ?? 0,
+        words_count: actualWordsCount,
         last_imported_at: new Date().toISOString(),
       })
       .eq("id", seriesId);
 
+    const eventsSkipped = allEvents.length - eventsToProcess.length;
+
     return NextResponse.json({
-      message: `Imported ${eventsImported} events, ${wordsImported} words, ${resultsImported} results`,
+      message: `Imported ${eventsImported} events, ${wordsImported} words, ${resultsImported} results` +
+        (eventsSkipped > 0 ? ` (${eventsSkipped} excluded events skipped)` : ""),
       eventsImported,
       wordsImported,
       resultsImported,
       totalEventsFound: allEvents.length,
+      eventsSkipped,
       errors,
     });
   } catch (err) {

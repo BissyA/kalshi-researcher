@@ -210,7 +210,7 @@ export default function HomePage() {
       {previousEvents.length > 0 && (
         <div className="space-y-3">
           <h2 className="text-lg font-semibold text-white">
-            Previous Events
+            Researched Events
           </h2>
           <div className="space-y-2">
             {previousEvents.map((ev) => (

@@ -12,6 +12,7 @@ interface WordResult {
 interface SeriesEvent {
   id: string;
   title: string;
+  eventTicker: string;
   eventDate: string | null;
   status: string;
   words: WordResult[];
@@ -25,6 +26,7 @@ interface KalshiMarketsTabProps {
   onAddSeries: (seriesTicker: string, displayName: string) => Promise<void>;
   onDeleteSeries: (seriesId: string) => Promise<void>;
   onImportSeries: (seriesId: string) => Promise<{ eventsImported: number; wordsImported: number; resultsImported: number; errors: string[] }>;
+  onRemoveEvent: (eventId: string, seriesId: string) => Promise<void>;
 }
 
 export function KalshiMarketsTab({
@@ -35,6 +37,7 @@ export function KalshiMarketsTab({
   onAddSeries,
   onDeleteSeries,
   onImportSeries,
+  onRemoveEvent,
 }: KalshiMarketsTabProps) {
   const [adding, setAdding] = useState(false);
   const [importingId, setImportingId] = useState<string | null>(null);
@@ -48,6 +51,10 @@ export function KalshiMarketsTab({
 
   // Expandable event → words
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+
+  // Event filter and removal
+  const [eventFilter, setEventFilter] = useState("");
+  const [removingEventId, setRemovingEventId] = useState<string | null>(null);
 
   const fetchSeriesEvents = useCallback(async (seriesId: string) => {
     setEventsLoading(true);
@@ -67,9 +74,11 @@ export function KalshiMarketsTab({
       setExpandedSeriesId(null);
       setSeriesEvents([]);
       setExpandedEventId(null);
+      setEventFilter("");
     } else {
       setExpandedSeriesId(seriesId);
       setExpandedEventId(null);
+      setEventFilter("");
       fetchSeriesEvents(seriesId);
     }
   }
@@ -140,6 +149,23 @@ export function KalshiMarketsTab({
       setStatusMessage({ type: "error", text: (err as Error).message });
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  async function handleRemoveEvent(eventId: string) {
+    if (!expandedSeriesId) return;
+    const event = seriesEvents.find((e) => e.id === eventId);
+    if (!event) return;
+
+    setRemovingEventId(eventId);
+    try {
+      await onRemoveEvent(eventId, expandedSeriesId);
+      await fetchSeriesEvents(expandedSeriesId);
+      setStatusMessage({ type: "success", text: "Event removed" });
+    } catch (err) {
+      setStatusMessage({ type: "error", text: (err as Error).message });
+    } finally {
+      setRemovingEventId(null);
     }
   }
 
@@ -274,78 +300,122 @@ export function KalshiMarketsTab({
                         <p className="text-zinc-500 text-xs">No events imported yet. Click Refresh to import.</p>
                       </div>
                     ) : (
-                      <div className="divide-y divide-zinc-800/50">
-                        {seriesEvents.map((event) => {
-                          const isEventExpanded = expandedEventId === event.id;
-                          const yesCount = event.words.filter((w) => w.wasMentioned).length;
-                          const noCount = event.words.filter((w) => !w.wasMentioned).length;
-                          return (
-                            <div key={event.id}>
-                              {/* Event row */}
-                              <button
-                                onClick={() => toggleEventExpand(event.id)}
-                                className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-zinc-800/30 transition-colors"
-                              >
-                                <div className="flex items-center gap-3">
-                                  <svg
-                                    className={`w-3 h-3 text-zinc-600 transition-transform flex-shrink-0 ${isEventExpanded ? "rotate-90" : ""}`}
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                                  </svg>
-                                  <div>
-                                    <span className="text-sm text-zinc-300">{event.title}</span>
-                                    <div className="flex items-center gap-3 mt-0.5 text-xs text-zinc-600">
-                                      <span>{formatDate(event.eventDate)}</span>
-                                      <span className="text-green-500/70">{yesCount}Y</span>
-                                      <span className="text-red-500/70">{noCount}N</span>
+                      <>
+                        {/* Event filter */}
+                        <div className="px-4 pt-3">
+                          <input
+                            type="text"
+                            value={eventFilter}
+                            onChange={(e) => setEventFilter(e.target.value)}
+                            placeholder="Filter events by title..."
+                            className="w-full px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-zinc-500"
+                          />
+                          {eventFilter && (
+                            <p className="text-xs text-zinc-600 mt-1">
+                              Showing {seriesEvents.filter((e) => e.title.toLowerCase().includes(eventFilter.toLowerCase())).length} of {seriesEvents.length} events
+                            </p>
+                          )}
+                        </div>
+                        <div className="divide-y divide-zinc-800/50">
+                          {seriesEvents
+                            .filter((e) =>
+                              !eventFilter.trim() || e.title.toLowerCase().includes(eventFilter.toLowerCase())
+                            )
+                            .map((event) => {
+                              const isEventExpanded = expandedEventId === event.id;
+                              const yesCount = event.words.filter((w) => w.wasMentioned).length;
+                              const noCount = event.words.filter((w) => !w.wasMentioned).length;
+                              const isRemoving = removingEventId === event.id;
+                              return (
+                                <div key={event.id}>
+                                  {/* Event row */}
+                                  <div className="w-full px-4 py-3 flex items-center justify-between hover:bg-zinc-800/30 transition-colors">
+                                    <button
+                                      onClick={() => toggleEventExpand(event.id)}
+                                      className="flex items-center gap-3 text-left flex-1 min-w-0"
+                                    >
+                                      <svg
+                                        className={`w-3 h-3 text-zinc-600 transition-transform flex-shrink-0 ${isEventExpanded ? "rotate-90" : ""}`}
+                                        fill="none"
+                                        stroke="currentColor"
+                                        viewBox="0 0 24 24"
+                                      >
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                      </svg>
+                                      <div className="min-w-0">
+                                        {event.eventTicker ? (
+                                          <a
+                                            href={`https://kalshi.com/markets/${event.eventTicker.toLowerCase().replace(/-.*$/, "")}/${event.eventTicker.toLowerCase()}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="text-sm text-zinc-300 hover:text-blue-400 block truncate"
+                                          >
+                                            {event.title}
+                                          </a>
+                                        ) : (
+                                          <span className="text-sm text-zinc-300 block truncate">{event.title}</span>
+                                        )}
+                                        <div className="flex items-center gap-3 mt-0.5 text-xs text-zinc-600">
+                                          <span>{formatDate(event.eventDate)}</span>
+                                          <span className="text-green-500/70">{yesCount}Y</span>
+                                          <span className="text-red-500/70">{noCount}N</span>
+                                        </div>
+                                      </div>
+                                    </button>
+                                    <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                                      <span className={`text-xs px-2 py-0.5 rounded ${
+                                        event.status === "completed"
+                                          ? "bg-zinc-800 text-zinc-400"
+                                          : "bg-yellow-900/30 text-yellow-400"
+                                      }`}>
+                                        {event.status}
+                                      </span>
+                                      <button
+                                        onClick={() => handleRemoveEvent(event.id)}
+                                        disabled={isRemoving}
+                                        className="px-2 py-1 text-xs text-red-400/70 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors disabled:opacity-50"
+                                        title="Remove this event from the series (will not be re-imported)"
+                                      >
+                                        {isRemoving ? "..." : "x"}
+                                      </button>
                                     </div>
                                   </div>
-                                </div>
-                                <span className={`text-xs px-2 py-0.5 rounded ${
-                                  event.status === "completed"
-                                    ? "bg-zinc-800 text-zinc-400"
-                                    : "bg-yellow-900/30 text-yellow-400"
-                                }`}>
-                                  {event.status}
-                                </span>
-                              </button>
 
-                              {/* Expanded word results */}
-                              {isEventExpanded && event.words.length > 0 && (
-                                <div className="px-4 pb-3 pl-10">
-                                  <div className="bg-zinc-900/60 border border-zinc-800/50 rounded-lg overflow-hidden">
-                                    <table className="w-full text-xs">
-                                      <thead>
-                                        <tr className="border-b border-zinc-800/50">
-                                          <th className="text-left py-1.5 px-3 text-zinc-500 font-medium">Word</th>
-                                          <th className="text-center py-1.5 px-3 text-zinc-500 font-medium w-20">Mentioned</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody className="divide-y divide-zinc-800/30">
-                                        {event.words.map((w) => (
-                                          <tr key={w.word}>
-                                            <td className="py-1 px-3 text-zinc-300">{w.word}</td>
-                                            <td className="py-1 px-3 text-center">
-                                              {w.wasMentioned ? (
-                                                <span className="text-green-400 font-semibold">Y</span>
-                                              ) : (
-                                                <span className="text-red-400 font-semibold">N</span>
-                                              )}
-                                            </td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
+                                  {/* Expanded word results */}
+                                  {isEventExpanded && event.words.length > 0 && (
+                                    <div className="px-4 pb-3 pl-10">
+                                      <div className="bg-zinc-900/60 border border-zinc-800/50 rounded-lg overflow-hidden">
+                                        <table className="w-full text-xs">
+                                          <thead>
+                                            <tr className="border-b border-zinc-800/50">
+                                              <th className="text-left py-1.5 px-3 text-zinc-500 font-medium">Word</th>
+                                              <th className="text-center py-1.5 px-3 text-zinc-500 font-medium w-20">Mentioned</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-zinc-800/30">
+                                            {event.words.map((w) => (
+                                              <tr key={w.word}>
+                                                <td className="py-1 px-3 text-zinc-300">{w.word}</td>
+                                                <td className="py-1 px-3 text-center">
+                                                  {w.wasMentioned ? (
+                                                    <span className="text-green-400 font-semibold">Y</span>
+                                                  ) : (
+                                                    <span className="text-red-400 font-semibold">N</span>
+                                                  )}
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
+                              );
+                            })}
+                        </div>
+                      </>
                     )}
                   </div>
                 )}

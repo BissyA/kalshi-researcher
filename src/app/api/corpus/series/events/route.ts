@@ -18,7 +18,7 @@ export async function GET(request: Request) {
   // Fetch events for this series, ordered by most recent first
   const { data: events, error: eventsError } = await supabase
     .from("events")
-    .select("id, title, event_date, status")
+    .select("id, title, kalshi_event_ticker, event_date, status")
     .eq("series_id", seriesId)
     .order("event_date", { ascending: false, nullsFirst: false });
 
@@ -83,6 +83,7 @@ export async function GET(request: Request) {
     return {
       id: e.id,
       title: e.title,
+      eventTicker: e.kalshi_event_ticker,
       eventDate: e.event_date,
       status: e.status,
       words,
@@ -90,4 +91,97 @@ export async function GET(request: Request) {
   });
 
   return NextResponse.json({ events: enrichedEvents });
+}
+
+// DELETE: Remove a single event from a series and add its ticker to excluded_tickers
+// so it won't be re-imported on refresh
+export async function DELETE(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const eventId = searchParams.get("eventId");
+  const seriesId = searchParams.get("seriesId");
+
+  if (!eventId || !seriesId) {
+    return NextResponse.json(
+      { error: "eventId and seriesId are required" },
+      { status: 400 }
+    );
+  }
+
+  const supabase = getServerSupabase();
+
+  // Look up the event to get its ticker and verify it belongs to this series
+  const { data: event, error: eventError } = await supabase
+    .from("events")
+    .select("id, kalshi_event_ticker, series_id")
+    .eq("id", eventId)
+    .single();
+
+  if (eventError || !event) {
+    return NextResponse.json(
+      { error: `Event not found: ${eventError?.message ?? "no record"}` },
+      { status: 404 }
+    );
+  }
+
+  if (event.series_id !== seriesId) {
+    return NextResponse.json(
+      { error: "Event does not belong to this series" },
+      { status: 400 }
+    );
+  }
+
+  // Cascade-delete the event's dependent records (same FK order as series DELETE)
+  await supabase.from("event_results").delete().eq("event_id", eventId);
+  await supabase.from("word_scores").delete().eq("event_id", eventId);
+  await supabase.from("trades").delete().eq("event_id", eventId);
+  await supabase.from("words").delete().eq("event_id", eventId);
+  await supabase.from("word_clusters").delete().eq("event_id", eventId);
+  await supabase.from("research_runs").delete().eq("event_id", eventId);
+  await supabase.from("events").delete().eq("id", eventId);
+
+  // Add the ticker to the series excluded_tickers array
+  const { data: series } = await supabase
+    .from("series")
+    .select("excluded_tickers")
+    .eq("id", seriesId)
+    .single();
+
+  const currentExcluded: string[] = (series?.excluded_tickers as string[] | null) ?? [];
+  if (!currentExcluded.includes(event.kalshi_event_ticker)) {
+    currentExcluded.push(event.kalshi_event_ticker);
+  }
+
+  // Re-count events and words for this series
+  const { count: remainingEvents } = await supabase
+    .from("events")
+    .select("*", { count: "exact", head: true })
+    .eq("series_id", seriesId);
+
+  const { data: remainingEventIds } = await supabase
+    .from("events")
+    .select("id")
+    .eq("series_id", seriesId);
+
+  let remainingWords = 0;
+  if (remainingEventIds && remainingEventIds.length > 0) {
+    const { count } = await supabase
+      .from("words")
+      .select("*", { count: "exact", head: true })
+      .in("event_id", remainingEventIds.map((e) => e.id));
+    remainingWords = count ?? 0;
+  }
+
+  await supabase
+    .from("series")
+    .update({
+      excluded_tickers: currentExcluded,
+      events_count: remainingEvents ?? 0,
+      words_count: remainingWords,
+    })
+    .eq("id", seriesId);
+
+  return NextResponse.json({
+    success: true,
+    excludedTicker: event.kalshi_event_ticker,
+  });
 }

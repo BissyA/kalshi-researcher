@@ -134,18 +134,15 @@ export async function runResearchPipeline(
       },
     ];
 
-    // Only run news cycle for the "current" layer
-    if (input.layer === "current") {
-      agentPromises.push({
-        name: "news_cycle",
-        promise: runNewsCycleAgent({
-          speaker: input.event.speaker,
-          eventTitle: input.event.title,
-          eventDate: input.event.eventDate,
-          words: wordNames,
-        }),
-      });
-    }
+    agentPromises.push({
+      name: "news_cycle",
+      promise: runNewsCycleAgent({
+        speaker: input.event.speaker,
+        eventTitle: input.event.title,
+        eventDate: input.event.eventDate,
+        words: wordNames,
+      }),
+    });
 
     // Run all agents in parallel, tracking completion
     const results = await Promise.allSettled(
