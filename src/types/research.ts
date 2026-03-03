@@ -171,6 +171,14 @@ export interface SynthesisResult {
   };
 }
 
+// ── Corpus Types ──
+
+export interface CorpusMentionRate {
+  mentionRate: number;
+  yesCount: number;
+  totalEvents: number;
+}
+
 // ── Orchestrator Types ──
 
 export interface OrchestratorInput {
@@ -197,6 +205,7 @@ export interface OrchestratorInput {
     eventFormatResult?: EventFormatResult;
     marketAnalysisResult?: MarketAnalysisResult;
   };
+  corpusMentionRates?: Record<string, CorpusMentionRate>;
 }
 
 export interface OrchestratorOutput {

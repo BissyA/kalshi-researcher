@@ -38,14 +38,27 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [event, setEvent] = useState<LoadedEvent | null>(null);
   const [words, setWords] = useState<LoadedWord[]>([]);
-  const [speaker, setSpeaker] = useState("");
-  const [eventType, setEventType] = useState("");
   const [previousEvents, setPreviousEvents] = useState<PreviousEvent[]>([]);
   const [researchLoading, setResearchLoading] = useState(false);
+  const [speakers, setSpeakers] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState("");
 
   useEffect(() => {
     fetchPreviousEvents();
+    fetchSpeakers();
   }, []);
+
+  async function fetchSpeakers() {
+    try {
+      const res = await fetch("/api/corpus/speakers");
+      if (res.ok) {
+        const data = await res.json();
+        setSpeakers(data.speakers ?? []);
+      }
+    } catch {
+      // silently fail
+    }
+  }
 
   async function fetchPreviousEvents() {
     try {
@@ -81,8 +94,6 @@ export default function HomePage() {
 
       setEvent(data.event);
       setWords(data.words);
-      setSpeaker(data.event.speaker);
-      setEventType(data.event.event_type);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -93,6 +104,14 @@ export default function HomePage() {
   async function startResearch() {
     if (!event) return;
     setResearchLoading(true);
+    // Persist speaker selection before navigating
+    if (selectedSpeakerId) {
+      await fetch("/api/events/speaker", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventId: event.id, speakerId: selectedSpeakerId }),
+      }).catch(() => {});
+    }
     router.push(`/research/${event.id}`);
   }
 
@@ -142,36 +161,22 @@ export default function HomePage() {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">
-                Speaker
-              </label>
-              <input
-                type="text"
-                value={speaker}
-                onChange={(e) => setSpeaker(e.target.value)}
-                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">
-                Event Type
-              </label>
-              <select
-                value={eventType}
-                onChange={(e) => setEventType(e.target.value)}
-                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
-              >
-                <option value="address_to_congress">Address to Congress</option>
-                <option value="press_conference">Press Conference</option>
-                <option value="interview">Interview</option>
-                <option value="rally">Rally</option>
-                <option value="debate">Debate</option>
-                <option value="inauguration">Inauguration</option>
-                <option value="speech">Speech (Other)</option>
-              </select>
-            </div>
+          <div>
+            <label className="block text-sm text-zinc-400 mb-1">
+              Speaker
+            </label>
+            <select
+              value={selectedSpeakerId}
+              onChange={(e) => setSelectedSpeakerId(e.target.value)}
+              className="w-full max-w-xs px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
+            >
+              <option value="">None (no corpus data)</option>
+              {speakers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
           </div>
 
           {/* Word List Preview */}

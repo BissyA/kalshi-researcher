@@ -284,6 +284,7 @@ export async function runResearchPipeline(
       eventFormatResult,
       marketAnalysisResult,
       clusterResult: clusteringResult.data,
+      corpusMentionRates: input.corpusMentionRates,
     });
 
     completedAgents.push("synthesizer");

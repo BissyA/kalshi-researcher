@@ -193,7 +193,7 @@ export default function ResearchDashboard({
       const res = await fetch("/api/research/trigger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId, layer }),
+        body: JSON.stringify({ eventId, layer, speakerId: selectedSpeakerId || undefined }),
       });
 
       if (!res.ok || !res.body) {
@@ -382,6 +382,17 @@ export default function ResearchDashboard({
         wsStatus={wsStatus}
         lastPriceUpdate={lastPriceUpdate}
         hasMarketTickers={marketTickers.length > 0}
+        speakers={speakers}
+        selectedSpeakerId={selectedSpeakerId}
+        onSpeakerChange={(speakerId: string) => {
+          setSelectedSpeakerId(speakerId);
+          // Persist speaker selection to event record
+          fetch("/api/events/speaker", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ eventId, speakerId: speakerId || null }),
+          }).catch(() => {});
+        }}
         onTriggerResearch={triggerResearch}
       />
 

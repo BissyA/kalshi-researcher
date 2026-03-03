@@ -40,7 +40,7 @@ Kalshi offers "mention markets" where you bet on whether a speaker will say a sp
 This tool:
 
 1. **Loads** a Kalshi mention market event by URL or ticker
-2. **Runs 7 AI research agents** (powered by Claude Opus 4) to analyze historical patterns, current news, agenda items, and market pricing
+2. **Runs 7 AI research agents** (powered by Claude Opus 4) to analyze historical patterns, current news, agenda items, market pricing, and corpus settlement data (ground truth mention rates from Kalshi)
 3. **Produces per-word probability estimates** with reasoning
 4. **Surfaces structured event context** — event format, duration, Q&A expectations, agenda analysis, exogenous events, likely topics, and recent speaker statements extracted from agent results
 5. **Displays corpus-integrated word analysis** — live market prices cross-referenced against historical mention rates from Kalshi settled market data (ground truth), with manual speaker selection, expandable per-event detail, and edge detection
@@ -54,8 +54,10 @@ This tool:
 13. **Quick Analysis** — paste a Kalshi mention market URL to instantly compare live market prices against historical mention rates, with WebSocket live price updates, saved search persistence, and edge detection
 
 The research happens in two layers:
-- **Baseline layer** (comprehensive): historical frequency, event format analysis, agenda research, news cycle analysis, market structure
+- **Baseline layer** (comprehensive): historical frequency, event format analysis, agenda research, news cycle analysis, market structure, corpus settlement data (when speaker is selected)
 - **Current layer** (refresh): re-runs all agents with latest data closer to the event. Reuses baseline results as context.
+
+**Both layers run all 7 agents.** The only difference is that current layer loads existing baseline results as additional context via `existingResearch`.
 
 ### What has been tested end-to-end
 - One successful "current" layer research run (Trump Corpus Christi speech, Feb 28 2026)
@@ -72,6 +74,8 @@ The research happens in two layers:
 - Analytics expandable trade detail with corpus-based mention rates and edge calculations
 - Quick Analysis tab: paste URL → live price vs historical rate comparison with WebSocket updates and saved searches
 - News Cycle agent runs on both baseline and current layers
+- Corpus data injection: selected speaker's settled Kalshi mention rates fed into synthesizer as empirical base rates
+- Home page speaker selection flows through to research pipeline and analytics
 
 ---
 
@@ -117,7 +121,7 @@ kalshi-research/
 └── src/
     ├── types/
     │   ├── kalshi.ts             # KalshiEvent, KalshiMarket, WordContract
-    │   ├── research.ts           # All agent I/O types, OrchestratorInput/Output
+    │   ├── research.ts           # All agent I/O types, OrchestratorInput/Output, CorpusMentionRate
     │   ├── database.ts           # TypeScript interfaces for all DB table rows (including DbSpeaker, DbSeries)
     │   ├── components.ts         # Shared component-level types (Event, WordScore, Cluster, Trade, etc.)
     │   └── corpus.ts             # MentionHistoryRow, MentionEventDetail, SeriesWithStats, SpeakerWithSeries
@@ -134,14 +138,14 @@ kalshi-research/
     │   └── useLivePrices.ts      # Client-side EventSource hook for live Kalshi prices
     │
     ├── agents/
-    │   ├── orchestrator.ts       # 3-phase pipeline with cancellation + transcript caching
+    │   ├── orchestrator.ts       # 3-phase pipeline with cancellation + transcript caching + corpus pass-through
     │   ├── historical.ts         # Past speech transcript analysis
     │   ├── agenda.ts             # Advance info + agenda research
     │   ├── news-cycle.ts         # Last 72-hour news analysis
     │   ├── event-format.ts       # Event structure analysis
     │   ├── market-analysis.ts    # Pure price/volume analysis
     │   ├── clustering.ts         # Thematic word grouping
-    │   └── synthesizer.ts        # Final probability synthesis + markdown briefing
+    │   └── synthesizer.ts        # Final probability synthesis + markdown briefing + corpus-aware weighting
     │
     ├── components/
     │   ├── corpus/               # 8 components for the /corpus page
@@ -178,7 +182,7 @@ kalshi-research/
     └── app/
         ├── layout.tsx            # Root layout: dark theme, nav bar (Home | Corpus | Analytics)
         ├── globals.css           # Tailwind v4, dark-only theme
-        ├── page.tsx              # Home: URL input, event loading
+        ├── page.tsx              # Home: URL input, corpus speaker selection, event loading
         │
         ├── research/
         │   └── [eventId]/
@@ -197,7 +201,7 @@ kalshi-research/
             │   └── speaker/route.ts      # PATCH: persist speaker selection on an event
             │
             ├── research/
-            │   ├── trigger/route.ts      # POST: start research (SSE stream)
+            │   ├── trigger/route.ts      # POST: start research (SSE stream, accepts speakerId, fetches corpus data)
             │   ├── stop/route.ts         # POST: cancel a running run
             │   ├── [eventId]/route.ts    # GET: full research data
             │   └── status/[runId]/route.ts # GET: run status
@@ -459,7 +463,7 @@ speakers (manually created)
 
 **Two speaker linkage paths**:
 1. **Corpus path** (indirect): `speakers` → `series` → `events` (via `events.series_id`). This links corpus-imported events to speakers through their Kalshi series.
-2. **Direct path**: `speakers` → `events` (via `events.speaker_id`). This is set explicitly by the user from the research page WordTable dropdown. Used by the analytics API to know which speaker's corpus data to pull for historical mention rates.
+2. **Direct path**: `speakers` → `events` (via `events.speaker_id`). Set from the home page speaker dropdown (before research) or the research page EventHeader/WordTable dropdown. Persisted via `PATCH /api/events/speaker`. Used by: (a) the research trigger API to fetch corpus mention rates for the synthesizer, (b) the analytics API to pull corpus historical mention rates for trade evaluation.
 
 **Critical design decision**: Speakers are NEVER inferred from event titles. The user explicitly creates a speaker, then adds Kalshi series to that speaker. For analytics, the user explicitly links each event to a speaker via the research page. This was a deliberate choice — inferring speakers from titles like "Trump Address to Congress" is too fragile for serious trading decisions.
 
@@ -619,12 +623,21 @@ All agents live in `src/agents/`. Each exports a single `run*Agent(input)` funct
 
 | Agent | File | Web Search | Max Tokens | Purpose |
 |-------|------|-----------|------------|---------|
-| Synthesizer | `synthesizer.ts` | No | **32,000** | Final per-word probabilities with reasoning. **Generates markdown briefing** (800-1500 words). |
+| Synthesizer | `synthesizer.ts` | No | **32,000** | Final per-word probabilities with reasoning. **Generates markdown briefing** (800-1500 words). Accepts corpus settlement data when available. |
 
 **Synthesizer weighting formula:**
 ```
-probability = historical (scriptedWeight * 40%) + agenda (25%) + news (currentContextWeight * 25%) + base_rate (remainder)
+Without corpus data:
+  probability = historical (scriptedWeight * 40%) + agenda (25%) + news (currentContextWeight * 25%) + base_rate (remainder)
+
+With corpus data (speaker selected):
+  remainder = 100% - historical - agenda - news
+  base_rate = remainder * 30%
+  corpus = remainder * 70%
+  probability = historical + agenda + news + base_rate + corpus
 ```
+
+When corpus data is available, the synthesizer receives an additional `=== CORPUS MENTION HISTORY (Settled Kalshi Markets) ===` section showing per-word empirical mention rates (e.g., "border: 75% mention rate (9/12 events)"). The system prompt instructs the model to use corpus rates as the **primary anchor** for `baseRateProbability`, only deviating when there's strong evidence this event is different.
 
 ### Agent Input/Output Types
 
@@ -678,6 +691,12 @@ interface SynthesisResult {
   };
 }
 
+interface CorpusMentionRate {
+  mentionRate: number;   // 0-1, e.g. 0.75 = mentioned in 75% of past events
+  yesCount: number;      // times mentioned
+  totalEvents: number;   // total events checked
+}
+
 interface OrchestratorInput {
   event: {
     id: string; kalshiEventTicker: string; title: string;
@@ -686,6 +705,7 @@ interface OrchestratorInput {
   words: Array<{ id: string; ticker: string; word: string; yesPrice: number; noPrice: number }>;
   layer: "baseline" | "current";
   existingResearch?: { historicalResult?; agendaResult?; eventFormatResult?; marketAnalysisResult? };
+  corpusMentionRates?: Record<string, CorpusMentionRate>;  // keyed by lowercase word
 }
 ```
 
@@ -718,6 +738,16 @@ market ─────┘
 
 All DB writes are individually wrapped in try/catch — a failed write doesn't crash the pipeline.
 
+### Corpus Data Flow
+
+When a speaker is selected (via `speakerId` in the trigger request or from `event.speaker_id`):
+
+1. **Trigger API** fetches corpus data: `speakers` → `series` (by `speaker_id`) → `event_results` (paginated, joined with `words` and `events`) → filter by series → build `corpusMentionRates` map (word → { mentionRate, yesCount, totalEvents })
+2. **Orchestrator** passes `corpusMentionRates` through to the synthesizer (single field pass-through, no transformation)
+3. **Synthesizer** receives corpus data as an additional research section, reallocates weight from base_rate to corpus (70/30 split), and instructs Claude to use corpus rates as the primary anchor for base rate probability
+
+If no speaker is selected or the speaker has no series/settlement data, `corpusMentionRates` is `undefined` and the synthesizer falls back to its standard weighting (no corpus weight).
+
 ---
 
 ## API Routes
@@ -729,7 +759,7 @@ All DB writes are individually wrapped in try/catch — a failed write doesn't c
 | `/api/events/load` | POST | Load event from Kalshi by URL or ticker |
 | `/api/events/list` | GET | List events with research runs (excludes corpus-only imports) |
 | `/api/events/speaker` | PATCH | Persist speaker selection on an event `{ eventId, speakerId }` |
-| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream) |
+| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream). Accepts `{ eventId, layer, speakerId? }`. When `speakerId` is provided: persists to event, fetches corpus mention rates from settled Kalshi markets, passes to synthesizer. |
 | `/api/research/stop` | POST | Cancel a running research run |
 | `/api/research/[eventId]` | GET | Get full research data for an event |
 | `/api/research/status/[runId]` | GET | Check status of a specific run |
@@ -782,16 +812,17 @@ All DB writes are individually wrapped in try/catch — a failed write doesn't c
 ### Home Page (`/`)
 - URL input field for Kalshi event URLs or raw tickers
 - "Load Event" button fetches event data from Kalshi
-- Displays event details: title, ticker, speaker (editable), event type (dropdown)
+- **Speaker dropdown** — fetches speakers from `/api/corpus/speakers` and shows a dropdown to select which speaker's corpus data to use. This is the ONLY speaker selection on the home page (no free-text speaker input, no event type dropdown — agents determine those automatically).
+- Displays event details: title, ticker, word count
 - Shows grid of all word contracts with current YES prices
-- "Start Baseline Research" button navigates to research page
+- "Start Research" button — persists the selected speaker to the event record via `PATCH /api/events/speaker`, then navigates to the research page. The speaker selection flows through to the research trigger API which fetches corpus data for the synthesizer.
 - **"Researched Events" list** at the bottom — only shows events that have at least one research run (filtered via `/api/events/list` which queries `research_runs` table). Corpus-imported events without research runs are excluded entirely.
 
 ### Research Dashboard (`/research/[eventId]`)
 The main working page for tactical research on a specific upcoming Kalshi mention market event. Tabbed layout with extracted components.
 
 **Always visible:**
-- `EventHeader` — Event title, speaker, date, WS status, research buttons
+- `EventHeader` — Event title, speaker, date, WS status, corpus speaker dropdown (same speakers list as home page), research trigger buttons. The speaker dropdown here allows changing the speaker after initial selection on the home page — persists via `PATCH /api/events/speaker` and is sent with the next research trigger.
 - `ProgressMessages` — Real-time SSE progress during active research
 - `TabNavigation` — Three tabs: Research | Sources | Trade Log
 - `RunHistory` — Expandable research run history
@@ -930,6 +961,13 @@ TypeScript interfaces for all DB rows: `DbSpeaker`, `DbSeries`, `DbEvent`, `DbWo
 - Shows "Select a speaker" prompt when no speaker is selected
 - **Speaker selection persists**: `onSpeakerChange` callback saves the selection to the event record via `PATCH /api/events/speaker`, so it survives page reloads and is available to the analytics API
 
+**`EventHeader.tsx`** (updated):
+- Props: `{ event, hasBaseline, hasCurrent, researchRunning, wsStatus, lastPriceUpdate, hasMarketTickers, speakers, selectedSpeakerId, onSpeakerChange, onTriggerResearch }`
+- Contains a corpus speaker `<select>` dropdown next to the research trigger button
+- Speaker selection persists via the parent's `onSpeakerChange` callback (which calls `PATCH /api/events/speaker`)
+- The selected speaker is sent with the research trigger request as `speakerId`
+- Dropdown is disabled while research is running
+
 **Unused but kept components** (may be repurposed later):
 - `ResearchBriefing.tsx` — was the markdown research briefing, currently empty for all runs
 - `ClusterView.tsx` — was the thematic cluster groupings, temporarily removed from Research tab
@@ -1040,7 +1078,10 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 
 ### What's Built and Working
 - Full 7-agent research pipeline with streaming progress (all agents run on both layers)
+- **Corpus data injection** — when a speaker is selected, empirical mention rates from settled Kalshi markets are fetched and passed to the synthesizer as ground-truth base rates. Weight reallocation: 70% corpus / 30% generic base rate.
+- **Home page speaker selection** — corpus speaker dropdown on home page (no free-text speaker input or event type dropdown). Speaker persists to event record and flows through research trigger to synthesizer.
 - Tabbed research dashboard (Research | Sources | Trade Log) with extracted components
+- **EventHeader** — includes corpus speaker dropdown for changing speaker selection before/between research runs
 - **EventContext** — structured event context (format, duration, Q&A, agenda, exogenous events, likely topics, recent statements) surfaced from agent results
 - **WordTable** — corpus-integrated word analysis with manual speaker selection, historical rates from Kalshi settled market data (ground truth, 100+ event samples), expandable per-event detail, live WebSocket prices
 - **Sources tab** — aggregated sources from all agents with type tags (transcript, news, agenda, statement, event), clickable links to originals
@@ -1065,7 +1106,7 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - **Event types beyond speeches**: Only `address_to_congress` type events tested end-to-end with research.
 - **One empty event**: KXTRUMPMENTION has 1 event (a Press Conference) with 0 settled markets — this is a Kalshi data issue, not a bug.
 - **One missing result set**: KXTRUMPMENTIONB-25DEC03 has 20 words but 0 event_results (transient DB error during import). Re-import the series to fix.
-- **Analytics historical rates require speaker_id**: The analytics page only shows corpus historical mention rates for events where the user has explicitly set a speaker via the research page WordTable dropdown. Events without a `speaker_id` show "-" for Mention Rate and Edge columns.
+- **Analytics historical rates require speaker_id**: The analytics page only shows corpus historical mention rates for events where the user has set a speaker (via the home page dropdown before research, or the research page EventHeader/WordTable dropdown). Events without a `speaker_id` show "-" for Mention Rate and Edge columns. Setting the speaker on the home page before triggering research is now the recommended flow — it ensures both the synthesizer and analytics have corpus data.
 
 ### Architecture Improvements to Consider
 - Rate limiting for Claude API calls
@@ -1268,3 +1309,35 @@ Both layers: ~$1.60 - $4.40. Failed runs still cost money.
     7. The mention history and quick analysis tabs then show data only for the remaining (speaker-relevant) events
 
     **Important limitation**: Corpus import only fetches `status: "settled"` events from Kalshi. Upcoming/active events (like a hearing happening today) won't appear in corpus imports. For upcoming events, use the home page URL input to load them for research — the corpus provides historical context, not live event loading.
+
+### Phase 10: Corpus Data Injection into Research Pipeline (Mar 2026)
+
+71. **Corpus data in research pipeline** — The core gap this phase addresses: corpus settlement data (ground-truth mention rates from settled Kalshi markets) was previously only used for display in the WordTable UI, never fed into the AI research agents. Now, when a speaker is selected, the research trigger API fetches the speaker's empirical mention rates and passes them through the orchestrator to the synthesizer as `corpusMentionRates`.
+
+72. **`CorpusMentionRate` type** — New interface in `src/types/research.ts`: `{ mentionRate: number; yesCount: number; totalEvents: number }`. Added `corpusMentionRates?: Record<string, CorpusMentionRate>` to `OrchestratorInput`. Keyed by lowercase word name.
+
+73. **Trigger API corpus fetching** — `src/app/api/research/trigger/route.ts` now accepts optional `speakerId` in the request body. When provided (or when `event.speaker_id` exists):
+    - Persists `speaker_id` to the event record
+    - Finds all series belonging to the speaker
+    - Fetches all `event_results` (paginated in 1000-row chunks) joined with `words` and `events`
+    - Filters to the speaker's series by `series_id`
+    - Builds a normalized word → mention rate map
+    - Passes the map into `OrchestratorInput.corpusMentionRates`
+
+74. **Orchestrator pass-through** — `src/agents/orchestrator.ts` passes `input.corpusMentionRates` directly to the synthesizer input. No transformation — the orchestrator is a pass-through for corpus data.
+
+75. **Synthesizer corpus awareness** — `src/agents/synthesizer.ts` updated with three changes when corpus data is present:
+    - **Weight reallocation**: The "remainder" weight (after historical, agenda, news) is split 30% base_rate / 70% corpus (instead of 100% base_rate)
+    - **Corpus research section**: A new `=== CORPUS MENTION HISTORY (Settled Kalshi Markets) ===` section is appended to the research data, showing per-word empirical mention rates sorted by sample size
+    - **Calibration guidance**: System prompt instructs the model to use corpus mention rates as the **primary anchor** for `baseRateProbability`, only deviating with strong specific evidence. Example: "A word with a 75% corpus mention rate across 10+ events is extremely strong evidence"
+
+76. **Home page speaker dropdown** — `src/app/page.tsx` redesigned: removed the free-text Speaker input and Event Type dropdown. Added a single "Speaker" dropdown that fetches speakers from `/api/corpus/speakers`. When the user clicks "Start Research":
+    - If a speaker is selected, persists the selection to the event via `PATCH /api/events/speaker`
+    - Navigates to the research page, where the trigger API picks up the `speaker_id` and fetches corpus data
+    - Event type is no longer user-configured — the agents determine it from web search
+
+77. **EventHeader speaker dropdown** — `src/components/research/EventHeader.tsx` now includes a corpus speaker dropdown next to the research trigger button. Props extended with `speakers`, `selectedSpeakerId`, `onSpeakerChange`. Allows changing the speaker selection on the research dashboard (e.g., before triggering a follow-up research run). Disabled while research is running.
+
+78. **Research page speaker wiring** — `src/app/research/[eventId]/page.tsx` passes speaker data to EventHeader. The `triggerResearch` function sends `speakerId: selectedSpeakerId || undefined` in the request body. The `onSpeakerChange` callback persists changes via `PATCH /api/events/speaker`.
+
+79. **End-to-end speaker flow** — Established the recommended flow: Select speaker on home page → Load event → Start Research → speaker persists to event → trigger API fetches corpus data → synthesizer uses empirical rates → WordTable auto-loads corpus for that speaker → analytics gets speaker linkage for historical rate comparison. The speaker dropdown on EventHeader allows mid-session changes without going back to the home page.

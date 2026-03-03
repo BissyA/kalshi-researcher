@@ -7,6 +7,7 @@ import {
   EventFormatResult,
   MarketAnalysisResult,
   ClusterResult,
+  CorpusMentionRate,
 } from "@/types/research";
 
 interface SynthesizerInput {
@@ -24,6 +25,7 @@ interface SynthesizerInput {
   eventFormatResult: EventFormatResult;
   marketAnalysisResult: MarketAnalysisResult;
   clusterResult: ClusterResult;
+  corpusMentionRates?: Record<string, CorpusMentionRate>;
 }
 
 export async function runSynthesizer(
@@ -37,10 +39,15 @@ export async function runSynthesizer(
   const currentContextWeight = input.eventFormatResult.implications?.currentContextWeight ?? 0.5;
 
   const hasNewsCycle = input.newsCycleResult != null;
+  const hasCorpus = input.corpusMentionRates && Object.keys(input.corpusMentionRates).length > 0;
+
+  // When corpus data is available, allocate weight from base rate to corpus
   const historicalWeight = Math.round(scriptedWeight * 40);
   const agendaWeight = 25;
   const newsWeight = hasNewsCycle ? Math.round(currentContextWeight * 25) : 0;
-  const baseRateWeight = 100 - historicalWeight - agendaWeight - newsWeight;
+  const remainingWeight = 100 - historicalWeight - agendaWeight - newsWeight;
+  const baseRateWeight = hasCorpus ? Math.round(remainingWeight * 0.3) : remainingWeight;
+  const corpusWeight = hasCorpus ? remainingWeight - baseRateWeight : 0;
 
   const systemPrompt = `You are an expert prediction market analyst and political speech forecaster. You have been given comprehensive research about an upcoming event. Your job is to produce a final probability estimate for each word being mentioned.
 
@@ -58,6 +65,7 @@ Weighting framework (adjusted for event format):
 - Historical frequency: ${historicalWeight}% weight
 - Agenda/preview: ${agendaWeight}% weight
 ${hasNewsCycle ? `- News cycle: ${newsWeight}% weight` : "- News cycle: NOT AVAILABLE (baseline layer — set newsCycleProbability to 0.5 for all words)"}
+${hasCorpus ? `- Corpus (settled Kalshi markets): ${corpusWeight}% weight` : ""}
 - Base rate: ${baseRateWeight}% weight
 
 Important calibration guidance:
@@ -68,6 +76,13 @@ Important calibration guidance:
 - Consider word clusters: correlated words should have correlated probabilities.
 - Be aware that market prices incorporate crowd wisdom — if you disagree significantly with the market, explain why with specific evidence.
 - For a ${input.eventFormatResult.estimatedDurationMinutes}-minute ${input.eventFormatResult.format} speech, adjust base rates accordingly (longer = higher probability for most words).
+${hasCorpus ? `
+CORPUS DATA — CRITICAL: You have been provided empirical mention rates from ACTUAL settled Kalshi mention markets for this speaker. This is ground-truth data showing how often each word was actually mentioned across past events. When corpus data is available for a word:
+- Use the corpus mention rate as your PRIMARY ANCHOR for baseRateProbability.
+- A word with a 75% corpus mention rate across 10+ events is extremely strong evidence — your baseRateProbability should be close to that rate.
+- Only deviate significantly from the corpus rate when you have strong, specific evidence that this event is different (e.g., different event format, strong agenda/news signals).
+- For words NOT in the corpus data, fall back to your general base rate estimate.
+- In your briefing, explicitly reference the corpus data: e.g., "Corpus data shows 'border' was mentioned in 9/12 past events (75% rate)."` : ""}
 
 In addition to the structured word scores, produce a comprehensive research briefing as a markdown document in the "briefing" field. This briefing will be the primary thing the trader reads. It must:
 1. Be written as a flowing narrative, not a list of bullet points
@@ -121,6 +136,21 @@ Return structured JSON in this exact format:
 
 You MUST include an entry in wordScores for EVERY word in the list. Sort strongYes and strongNo by absolute edge descending.`;
 
+  // Build corpus section if available
+  let corpusSection = "";
+  if (hasCorpus) {
+    const corpusLines = Object.entries(input.corpusMentionRates!)
+      .sort((a, b) => b[1].totalEvents - a[1].totalEvents || b[1].mentionRate - a[1].mentionRate)
+      .map(([word, data]) =>
+        `  ${word}: ${Math.round(data.mentionRate * 100)}% mention rate (${data.yesCount}/${data.totalEvents} events)`
+      )
+      .join("\n");
+    corpusSection = `\n=== CORPUS MENTION HISTORY (Settled Kalshi Markets) ===
+This is EMPIRICAL DATA from actual settled Kalshi mention markets for ${input.speaker}. Each rate represents how often the word was actually mentioned across past events.
+${corpusLines}
+`;
+  }
+
   const researchData = `
 === HISTORICAL TRANSCRIPT ANALYSIS ===
 Transcripts found: ${input.historicalResult.transcriptsFound.length}
@@ -140,7 +170,7 @@ ${JSON.stringify(input.marketAnalysisResult, null, 2)}
 
 === WORD CLUSTERS ===
 ${JSON.stringify(input.clusterResult, null, 2)}
-`;
+${corpusSection}`;
 
   const userMessage = `Using all the research data below, produce final probability estimates for each word being mentioned at ${input.speaker}'s "${input.eventTitle}" on ${input.eventDate}.
 

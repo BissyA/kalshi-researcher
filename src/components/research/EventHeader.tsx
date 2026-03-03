@@ -22,6 +22,9 @@ interface EventHeaderProps {
   wsStatus: WsStatus;
   lastPriceUpdate: number | null;
   hasMarketTickers: boolean;
+  speakers: Array<{ id: string; name: string }>;
+  selectedSpeakerId: string;
+  onSpeakerChange: (speakerId: string) => void;
   onTriggerResearch: (layer: "baseline" | "current") => void;
 }
 
@@ -33,6 +36,9 @@ export function EventHeader({
   wsStatus,
   lastPriceUpdate,
   hasMarketTickers,
+  speakers,
+  selectedSpeakerId,
+  onSpeakerChange,
   onTriggerResearch,
 }: EventHeaderProps) {
   return (
@@ -69,6 +75,19 @@ export function EventHeader({
         </div>
       </div>
       <div className="flex items-center gap-3">
+        <select
+          value={selectedSpeakerId}
+          onChange={(e) => onSpeakerChange(e.target.value)}
+          disabled={researchRunning}
+          className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
+        >
+          <option value="">No speaker (corpus)</option>
+          {speakers.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
         <div className="flex gap-2">
           {hasBaseline && (
             <span className="text-xs px-2 py-1 rounded-full bg-green-900/50 text-green-400">

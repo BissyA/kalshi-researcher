@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase";
 import { runResearchPipeline } from "@/agents/orchestrator";
-import { OrchestratorInput } from "@/types/research";
+import { OrchestratorInput, CorpusMentionRate } from "@/types/research";
 
 export const maxDuration = 300; // 5 minutes for Vercel
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { eventId, layer = "baseline" } = body;
+    const { eventId, layer = "baseline", speakerId } = body;
 
     if (!eventId) {
       return NextResponse.json({ error: "eventId is required" }, { status: 400 });
@@ -31,6 +31,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Event not found" }, { status: 404 });
     }
 
+    // Persist speaker selection to event if provided
+    if (speakerId) {
+      await supabase
+        .from("events")
+        .update({ speaker_id: speakerId })
+        .eq("id", eventId);
+    }
+
     // Load words
     const { data: words } = await supabase
       .from("words")
@@ -40,6 +48,74 @@ export async function POST(request: Request) {
 
     if (!words || words.length === 0) {
       return NextResponse.json({ error: "No words found for this event" }, { status: 400 });
+    }
+
+    // Fetch corpus mention rates for the selected speaker
+    let corpusMentionRates: Record<string, CorpusMentionRate> | undefined;
+    const effectiveSpeakerId = speakerId || event.speaker_id;
+    if (effectiveSpeakerId) {
+      try {
+        // Find series belonging to this speaker
+        const { data: seriesData } = await supabase
+          .from("series")
+          .select("id")
+          .eq("speaker_id", effectiveSpeakerId);
+
+        const seriesIds = (seriesData ?? []).map((s) => s.id);
+
+        if (seriesIds.length > 0) {
+          // Fetch all event_results for events in these series, paginated
+          const PAGE_SIZE = 1000;
+          let offset = 0;
+          const allResults: Array<{
+            was_mentioned: boolean;
+            words: { word: string };
+            events: { series_id: string | null };
+          }> = [];
+
+          while (true) {
+            const { data: page } = await supabase
+              .from("event_results")
+              .select(`
+                was_mentioned,
+                words!inner ( word ),
+                events!inner ( series_id )
+              `)
+              .range(offset, offset + PAGE_SIZE - 1);
+
+            if (!page || page.length === 0) break;
+            allResults.push(...(page as unknown as typeof allResults));
+            if (page.length < PAGE_SIZE) break;
+            offset += PAGE_SIZE;
+          }
+
+          // Filter to this speaker's series and build mention rate map
+          const wordMap = new Map<string, { yesCount: number; totalCount: number }>();
+          for (const row of allResults) {
+            if (!row.events.series_id || !seriesIds.includes(row.events.series_id)) continue;
+            const normalizedWord = row.words.word.toLowerCase();
+            if (!wordMap.has(normalizedWord)) {
+              wordMap.set(normalizedWord, { yesCount: 0, totalCount: 0 });
+            }
+            const entry = wordMap.get(normalizedWord)!;
+            entry.totalCount++;
+            if (row.was_mentioned) entry.yesCount++;
+          }
+
+          if (wordMap.size > 0) {
+            corpusMentionRates = {};
+            for (const [word, stats] of wordMap) {
+              corpusMentionRates[word] = {
+                mentionRate: stats.totalCount > 0 ? stats.yesCount / stats.totalCount : 0,
+                yesCount: stats.yesCount,
+                totalEvents: stats.totalCount,
+              };
+            }
+          }
+        }
+      } catch (corpusErr) {
+        console.error("Failed to fetch corpus mention rates:", corpusErr);
+      }
     }
 
     // Load existing baseline research if running current layer
@@ -122,6 +198,7 @@ export async function POST(request: Request) {
           })),
           layer,
           existingResearch,
+          corpusMentionRates,
         };
 
         // Try to get current prices from Kalshi
