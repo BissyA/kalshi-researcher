@@ -1,14 +1,16 @@
 import { NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase";
 import { runResearchPipeline } from "@/agents/orchestrator";
-import { OrchestratorInput, CorpusMentionRate } from "@/types/research";
+import { OrchestratorInput, CorpusMentionRate, ModelPreset } from "@/types/research";
 
 export const maxDuration = 300; // 5 minutes for Vercel
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { eventId, layer = "baseline", speakerId } = body;
+    const { eventId, layer = "baseline", speakerId, modelPreset = "sonnet" } = body;
+    const validPresets: ModelPreset[] = ["opus", "hybrid", "sonnet", "haiku"];
+    const effectivePreset: ModelPreset = validPresets.includes(modelPreset) ? modelPreset : "sonnet";
 
     if (!eventId) {
       return NextResponse.json({ error: "eventId is required" }, { status: 400 });
@@ -148,6 +150,7 @@ export async function POST(request: Request) {
         event_id: eventId,
         layer,
         status: "running",
+        model_used: effectivePreset,
       })
       .select()
       .single();
@@ -197,6 +200,7 @@ export async function POST(request: Request) {
             noPrice: 0.5,
           })),
           layer,
+          modelPreset: effectivePreset,
           existingResearch,
           corpusMentionRates,
         };

@@ -6,6 +6,7 @@ interface EventFormatAgentInput {
   eventTitle: string;
   eventDate: string;
   venue?: string;
+  model?: string;
 }
 
 export async function runEventFormatAgent(
@@ -69,5 +70,6 @@ Find comparable past events and their durations. Determine if this will be scrip
     userMessage,
     maxTokens: 8000,
     enableWebSearch: true,
+    model: input.model,
   });
 }

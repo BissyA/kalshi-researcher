@@ -17,6 +17,7 @@ AI-powered research tool for Kalshi "mention markets" — prediction contracts o
 - [Architecture Deep Dive](#architecture-deep-dive)
 - [Research Agents](#research-agents)
 - [Orchestrator Pipeline](#orchestrator-pipeline)
+  - [Model Preset Routing](#model-preset-routing)
 - [API Routes](#api-routes)
 - [Frontend Pages](#frontend-pages)
 - [Component Architecture](#component-architecture)
@@ -40,7 +41,7 @@ Kalshi offers "mention markets" where you bet on whether a speaker will say a sp
 This tool:
 
 1. **Loads** a Kalshi mention market event by URL or ticker
-2. **Runs 7 AI research agents** (powered by Claude Opus 4) to analyze historical patterns, current news, agenda items, market pricing, and corpus settlement data (ground truth mention rates from Kalshi)
+2. **Runs 7 AI research agents** (powered by Claude, with configurable model presets: Opus, Hybrid, Sonnet, Haiku) to analyze historical patterns, current news, agenda items, market pricing, and corpus settlement data (ground truth mention rates from Kalshi)
 3. **Produces per-word probability estimates** with reasoning
 4. **Surfaces structured event context** — event format, duration, Q&A expectations, agenda analysis, exogenous events, likely topics, and recent speaker statements extracted from agent results
 5. **Displays corpus-integrated word analysis** — live market prices cross-referenced against historical mention rates from Kalshi settled market data (ground truth), with manual speaker selection, expandable per-event detail, and edge detection
@@ -76,6 +77,9 @@ The research happens in two layers:
 - News Cycle agent runs on both baseline and current layers
 - Corpus data injection: selected speaker's settled Kalshi mention rates fed into synthesizer as empirical base rates
 - Home page speaker selection flows through to research pipeline and analytics
+- Model preset selection from home page → research page → trigger API → orchestrator → agents
+- Model preset tag display on completed research runs in RunHistory
+- Retry logic on overloaded API errors (Haiku preset triggered 529 errors — retry helped but Haiku + web search remains unstable)
 
 ---
 
@@ -85,7 +89,7 @@ The research happens in two layers:
 |-----------|-----------|---------|
 | Framework | Next.js (App Router) | 16.1.6 |
 | Language | TypeScript (strict mode) | 5.x |
-| AI/LLM | Claude Opus 4 via `@anthropic-ai/sdk` | ^0.78.0 |
+| AI/LLM | Claude (Opus 4.6 / Sonnet 4.5 / Haiku 4.5) via `@anthropic-ai/sdk` | ^0.78.0 |
 | Database | Supabase (PostgreSQL) via `@supabase/supabase-js` | ^2.98.0 |
 | Styling | Tailwind CSS v4 | 4.x |
 | Charts | Recharts | ^3.7.0 |
@@ -127,7 +131,7 @@ kalshi-research/
     │   └── corpus.ts             # MentionHistoryRow, MentionEventDetail, SeriesWithStats, SpeakerWithSeries
     │
     ├── lib/
-    │   ├── claude-client.ts      # Claude API wrapper with web search + pause_turn + streaming
+    │   ├── claude-client.ts      # Claude API wrapper with per-model pricing, retry logic, web search + pause_turn + streaming
     │   ├── kalshi-client.ts      # Kalshi REST + WebSocket auth (RSA-PSS signing)
     │   ├── supabase.ts           # Client-side + server-side Supabase clients
     │   ├── url-parser.ts         # URL/ticker parsing, inferEventType(), extractWord()
@@ -138,7 +142,7 @@ kalshi-research/
     │   └── useLivePrices.ts      # Client-side EventSource hook for live Kalshi prices
     │
     ├── agents/
-    │   ├── orchestrator.ts       # 3-phase pipeline with cancellation + transcript caching + corpus pass-through
+    │   ├── orchestrator.ts       # 3-phase pipeline with model preset routing, cancellation, transcript caching, corpus pass-through
     │   ├── historical.ts         # Past speech transcript analysis
     │   ├── agenda.ts             # Advance info + agenda research
     │   ├── news-cycle.ts         # Last 72-hour news analysis
@@ -336,6 +340,7 @@ Each research execution against an event.
 | layer | text | 'baseline' or 'current' |
 | status | text | 'running', 'completed', 'failed', or 'cancelled' |
 | error_message | text | Set when status is 'failed' |
+| model_used | text | Model preset used for this run: `'opus'`, `'hybrid'`, `'sonnet'`, or `'haiku'`. Set on insert by the trigger API. Displayed as a purple badge in RunHistory. |
 | briefing | text | **Migration 003** — Markdown research briefing from synthesizer |
 | historical_result | jsonb | Phase 1 agent output |
 | agenda_result | jsonb | Phase 1 agent output |
@@ -545,7 +550,16 @@ The Claude client wraps the Anthropic SDK for two use cases:
 
 **Key design decisions:**
 
-- **Model**: `claude-opus-4-0` (hardcoded)
+- **Model selection**: Configurable per-call via the `model` option on `AgentCallOptions`. Default: `claude-sonnet-4-5-20250929` (Sonnet 4.5). Available models: `claude-opus-4-6` (Opus 4.6), `claude-sonnet-4-5-20250929` (Sonnet 4.5), `claude-haiku-4-5-20251001` (Haiku 4.5). Each agent in the pipeline receives its model from the orchestrator's `getAgentModels()` function based on the user's selected preset.
+- **Per-model pricing**: `MODEL_PRICING` lookup table maps model IDs to cost-per-million-tokens:
+  - Opus 4.6: $5.00 input / $25.00 output
+  - Sonnet 4.5: $3.00 input / $15.00 output
+  - Haiku 4.5: $1.00 input / $5.00 output
+- **Retry with exponential backoff**: Wraps the `.stream().finalMessage()` call in a retry loop. `MAX_RETRIES = 4`, `BASE_DELAY_MS = 3000` (delays: 3s, 6s, 12s, 24s). `isRetryableError()` catches:
+  - `Anthropic.APIError` with status 429 (rate limited), 500, 502, 503, 529 (overloaded)
+  - `APIConnectionError` (status === undefined)
+  - Any error whose message string contains "overloaded", "rate_limit", "529", or "connection"
+  - Detailed logging: `[claude-client] API call failed (model=..., attempt X/Y, retryable=...): ...`
 - **Streaming**: Uses `anthropic.messages.stream().finalMessage()` instead of `anthropic.messages.create()`. This is **required** because web search operations can take longer than 10 minutes, and the Anthropic SDK mandates streaming for long-running operations.
 - **Web search**: Uses `web_search_20250305` server-side tool. This is NOT a client-side tool — Anthropic's servers execute the search. The client only needs to handle `pause_turn` stop reasons.
 - **`pause_turn` handling**: When `stop_reason === "pause_turn"`, the client appends the response content as an assistant message and sends another request. This loops up to 5 times (`MAX_CONTINUATIONS`).
@@ -556,7 +570,7 @@ The Claude client wraps the Anthropic SDK for two use cases:
   3. **Balanced-brace parser**: Finds the first `{` and walks character-by-character tracking depth, string boundaries, and escape characters to find the matching `}`. This is more robust than regex for responses where Claude wraps JSON in explanatory text.
 - **JSON retry**: If parsing fails, `callAgentForJson` makes a second Claude call asking it to fix the malformed JSON. This adds to token usage but prevents pipeline crashes.
 
-**Cost tracking**: Every call returns token counts. The orchestrator accumulates these across all agents and stores them on the research run. Pricing: $15/M input tokens, $75/M output tokens (Claude Opus 4).
+**Cost tracking**: Every call returns token counts with per-model cost estimation. The orchestrator accumulates these across all agents and stores them on the research run.
 
 ### Kalshi Client (`src/lib/kalshi-client.ts`)
 
@@ -602,7 +616,7 @@ Two clients:
 
 ## Research Agents
 
-All agents live in `src/agents/`. Each exports a single `run*Agent(input)` function that returns a typed result plus token usage.
+All agents live in `src/agents/`. Each exports a single `run*Agent(input)` function that returns a typed result plus token usage. Every agent accepts an optional `model?: string` parameter in its input interface, which is passed through to `callAgentForJson()`. The orchestrator assigns models based on the user's selected preset (see [Model Preset Routing](#model-preset-routing)).
 
 ### Phase 1 Agents (run in parallel)
 
@@ -698,6 +712,8 @@ interface CorpusMentionRate {
   totalEvents: number;   // total events checked
 }
 
+type ModelPreset = "opus" | "hybrid" | "sonnet" | "haiku";
+
 interface OrchestratorInput {
   event: {
     id: string; kalshiEventTicker: string; title: string;
@@ -705,6 +721,7 @@ interface OrchestratorInput {
   };
   words: Array<{ id: string; ticker: string; word: string; yesPrice: number; noPrice: number }>;
   layer: "baseline" | "current";
+  modelPreset?: ModelPreset;  // controls per-agent model selection, default "sonnet"
   existingResearch?: { historicalResult?; agendaResult?; eventFormatResult?; marketAnalysisResult? };
   corpusMentionRates?: Record<string, CorpusMentionRate>;  // keyed by lowercase word
 }
@@ -715,6 +732,23 @@ interface OrchestratorInput {
 ## Orchestrator Pipeline
 
 `src/agents/orchestrator.ts` — `runResearchPipeline(input, runId, onProgress?)`
+
+### Model Preset Routing
+
+The orchestrator maps the user-selected `ModelPreset` to per-agent model assignments via `getAgentModels(preset)`:
+
+| Preset | Historical | Agenda | News Cycle | Event Format | Market Analysis | Clustering | Synthesizer |
+|--------|-----------|--------|------------|--------------|----------------|------------|-------------|
+| **Opus** (Full) | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 |
+| **Hybrid** | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Haiku 4.5 | Sonnet 4.5 | Haiku 4.5 | Opus 4.6 |
+| **Sonnet** (All) | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 |
+| **Haiku** (All) | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 |
+
+Model constants: `OPUS = "claude-opus-4-6"`, `SONNET = "claude-sonnet-4-5-20250929"`, `HAIKU = "claude-haiku-4-5-20251001"`. Type: `ModelPreset = "opus" | "hybrid" | "sonnet" | "haiku"`.
+
+The `AgentModelMap` (type `Record<AgentName, string>`) is computed once at pipeline start from `getAgentModels(input.modelPreset)`, then each agent call receives its assigned model string (e.g., `model: models.historical`). Every agent file accepts an optional `model?: string` parameter in its input interface and passes it through to `callAgentForJson()`.
+
+**Hybrid preset rationale**: Uses Opus only for the synthesizer (the most critical agent that produces final probability estimates), Sonnet for research-heavy agents (historical, agenda, news, market), and Haiku for simpler structural agents (event format, clustering). This significantly reduces cost while maintaining quality on the most important output.
 
 ### Transcript Caching (Internal Optimization)
 
@@ -760,7 +794,7 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 | `/api/events/load` | POST | Load event from Kalshi by URL or ticker |
 | `/api/events/list` | GET | List events with research runs (excludes corpus-only imports) |
 | `/api/events/speaker` | PATCH | Persist speaker selection on an event `{ eventId, speakerId }` |
-| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream). Accepts `{ eventId, layer, speakerId? }`. When `speakerId` is provided: persists to event, fetches corpus mention rates from settled Kalshi markets, passes to synthesizer. |
+| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream). Accepts `{ eventId, layer, speakerId?, modelPreset? }`. `modelPreset` can be `"opus"`, `"hybrid"`, `"sonnet"` (default), or `"haiku"` — controls which Claude model each agent uses. Saved to `research_runs.model_used`. When `speakerId` is provided: persists to event, fetches corpus mention rates from settled Kalshi markets, passes to synthesizer. |
 | `/api/research/stop` | POST | Cancel a running research run |
 | `/api/research/[eventId]` | GET | Get full research data for an event |
 | `/api/research/status/[runId]` | GET | Check status of a specific run |
@@ -815,19 +849,22 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 - URL input field for Kalshi event URLs or raw tickers
 - "Load Event" button fetches event data from Kalshi
 - **Speaker dropdown** — fetches speakers from `/api/corpus/speakers` and shows a dropdown to select which speaker's corpus data to use. This is the ONLY speaker selection on the home page (no free-text speaker input, no event type dropdown — agents determine those automatically).
+- **Model preset dropdown** — allows selecting which Claude model configuration to use for research: "Opus (Full) — highest quality", "Hybrid — Opus synthesizer, Sonnet/Haiku agents", "Sonnet (All) — good balance" (default), "Haiku (All) — cheapest". Stored in `modelPreset` state, passed as a URL query param (`?modelPreset=xxx`) when navigating to the research page.
 - Displays event details: title, ticker, word count
 - Shows grid of all word contracts with current YES prices
-- "Start Research" button — persists the selected speaker to the event record via `PATCH /api/events/speaker`, then navigates to the research page. The speaker selection flows through to the research trigger API which fetches corpus data for the synthesizer.
+- "Start Research" button — persists the selected speaker to the event record via `PATCH /api/events/speaker`, then navigates to the research page with the selected model preset as a query param. The speaker selection flows through to the research trigger API which fetches corpus data for the synthesizer.
 - **"Researched Events" list** at the bottom — only shows events that have at least one research run (filtered via `/api/events/list` which queries `research_runs` table). Corpus-imported events without research runs are excluded entirely. Uses Next.js `<Link>` components (not `<button>`) so items are right-clickable to open in a new tab.
 
 ### Research Dashboard (`/research/[eventId]`)
 The main working page for tactical research on a specific upcoming Kalshi mention market event. Tabbed layout with extracted components.
 
+Reads `modelPreset` from URL query params (e.g., `/research/abc123?modelPreset=hybrid`) and passes it to the trigger API when starting research. Defaults to `"sonnet"` if not specified.
+
 **Always visible:**
 - `EventHeader` — Event title, speaker, date, WS status, corpus speaker dropdown (same speakers list as home page), research trigger buttons. The speaker dropdown here allows changing the speaker after initial selection on the home page — persists via `PATCH /api/events/speaker` and is sent with the next research trigger.
 - `ProgressMessages` — Real-time SSE progress during active research
 - `TabNavigation` — Three tabs: Research | Sources | Trade Log
-- `RunHistory` — Expandable research run history
+- `RunHistory` — Expandable research run history with model preset tags (purple badges showing which model was used for each run)
 
 **Research tab** (designed for the trader's pre-event workflow):
 1. `EventContext` — Structured event context surfaced from agent results:
@@ -909,7 +946,9 @@ Strategic analytics page for long-term speaker data, completely separate from in
 
 ### Shared Types (`src/types/components.ts`)
 
-All component prop types defined here: Event, WordScore, Cluster, ResearchRun, ResearchSummary, Trade, Word, EventResult, SortKey, TabId (`"research" | "sources" | "tradelog"`), PriceData.
+All component prop types defined here: Event, WordScore, Cluster, ResearchRun (includes `model_used` field), ResearchSummary, Trade, Word, EventResult, SortKey, TabId (`"research" | "sources" | "tradelog"`), PriceData.
+
+Also exports `MODEL_PRESET_LABELS: Record<string, string>` — maps preset keys to display labels: `{ opus: "Opus (Full)", hybrid: "Hybrid", sonnet: "Sonnet (All)", haiku: "Haiku (All)" }`. Used by `RunHistory` to display model tags and can be reused anywhere preset labels are needed.
 
 ### Corpus Types (`src/types/corpus.ts`)
 
@@ -1060,7 +1099,7 @@ npm run build
 1. Create a Supabase project
 2. Run all six migrations (001-006) in order
 3. Get a Kalshi API key and RSA private key
-4. Get an Anthropic API key with Claude Opus 4 access
+4. Get an Anthropic API key with access to Claude Opus 4.6, Sonnet 4.5, and/or Haiku 4.5
 5. Fill in `.env.local` with all credentials
 
 ---
@@ -1087,6 +1126,9 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 
 ### What's Built and Working
 - Full 7-agent research pipeline with streaming progress (all agents run on both layers)
+- **Hybrid model support** — configurable model presets (Opus, Hybrid, Sonnet, Haiku) with per-agent model routing. Default: Sonnet (All). Model preset dropdown on home page, flows through URL params → research page → trigger API → orchestrator → agents → claude-client.
+- **Model tags on research runs** — purple badge in RunHistory showing which preset was used (e.g., "Sonnet (All)", "Hybrid"). Uses `MODEL_PRESET_LABELS` from `components.ts`.
+- **Retry with exponential backoff** — Claude API calls automatically retry on transient errors (429, 529, 500/502/503, connection errors). 4 retries with 3s base delay. Detailed error logging.
 - **Corpus data injection** — when a speaker is selected, empirical mention rates from settled Kalshi markets are fetched and passed to the synthesizer as ground-truth base rates. Weight reallocation: 70% corpus / 30% generic base rate.
 - **Home page speaker selection** — corpus speaker dropdown on home page (no free-text speaker input or event type dropdown). Speaker persists to event record and flows through research trigger to synthesizer.
 - Tabbed research dashboard (Research | Sources | Trade Log) with extracted components
@@ -1109,7 +1151,8 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 
 ### Known Limitations
 - **Supabase 1000-row limit**: All queries returning potentially large result sets must paginate. The corpus APIs handle this, but any new API routes querying large tables should use `.range()` pagination.
-- **Agent-level retry**: Individual agent failures get fallback empty results, no automatic retry.
+- **Agent-level retry**: Individual agent failures get fallback empty results, no automatic retry at the agent level. However, the Claude client now has retry with exponential backoff for transient API errors (429, 529, 500/502/503, connection errors).
+- **Haiku + web search overload**: The Haiku (All) preset has been observed to trigger `overloaded_error` (529) from the Anthropic API when agents use the `web_search` tool. In testing, all 4 Phase 1 agents with web search failed, while market_analysis (no web search) succeeded. The retry logic (4 retries, 3s base delay) may help for transient overloads, but sustained Haiku capacity issues with web search remain a known issue. **Workaround**: Use the Hybrid preset instead — it only assigns Haiku to event_format and clustering, which don't use web search.
 - **Multiple concurrent research runs**: Untested.
 - **Baseline layer**: One baseline run tested. News cycle agent now runs on both layers but baseline-specific results have limited production testing.
 - **Event types beyond speeches**: Only `address_to_congress` type events tested end-to-end with research.
@@ -1118,10 +1161,9 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - **Analytics historical rates require speaker_id**: The analytics page only shows corpus historical mention rates for events where the user has set a speaker (via the home page dropdown before research, or the research page EventHeader/WordTable dropdown). Events without a `speaker_id` show "-" for Mention Rate and Edge columns. Setting the speaker on the home page before triggering research is now the recommended flow — it ensures both the synthesizer and analytics have corpus data.
 
 ### Architecture Improvements to Consider
-- Rate limiting for Claude API calls
 - Proper error boundaries on frontend
-- Switching from Claude Opus 4 to a cheaper model for simpler agents
 - Batch market fetching in settlement check (currently sequential)
+- Per-agent model override (allow individual agent model selection beyond preset-level control)
 
 ---
 
@@ -1132,6 +1174,9 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - Three-tier JSON parsing: code fences → raw JSON → balanced-brace parser
 - `pause_turn` max 5 continuations
 - Synthesizer uses 32K tokens — monitor for truncation on 50+ word events
+- **Retry logging**: All API failures logged as `[claude-client] API call failed (model=..., attempt X/Y, retryable=...): ...`. Look for these in server console to debug transient errors.
+- **Model-specific issues**: Haiku 4.5 has been observed to fail with `overloaded_error` (529) when using web search. Check `[orchestrator] Phase 1 agent failed:` logs for which agents specifically failed.
+- **Default model**: Sonnet 4.5 (`claude-sonnet-4-5-20250929`). Changed from Opus 4.0 in Phase 12.
 
 ### Kalshi API
 - Website uses `/markets/` URLs, API uses `/events/`. Load route handles this.
@@ -1155,16 +1200,24 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 
 ## Cost Estimates
 
-Per research run (7 agents, one event with ~28 words):
+Per-model pricing (cost per million tokens):
 
-| Component | Estimated Cost |
-|-----------|---------------|
-| Phase 1 (5 agents, 4 with web search) | ~$0.50 - $1.50 |
-| Phase 2 (clustering) | ~$0.10 - $0.20 |
-| Phase 3 (synthesis, 32K max tokens) | ~$0.20 - $0.50 |
-| **Total per run** | **~$0.80 - $2.20** |
+| Model | Input | Output |
+|-------|-------|--------|
+| Opus 4.6 (`claude-opus-4-6`) | $5.00 | $25.00 |
+| Sonnet 4.5 (`claude-sonnet-4-5-20250929`) | $3.00 | $15.00 |
+| Haiku 4.5 (`claude-haiku-4-5-20251001`) | $1.00 | $5.00 |
 
-Both layers: ~$1.60 - $4.40. Failed runs still cost money.
+Estimated cost per research run (7 agents, one event with ~28 words):
+
+| Preset | Phase 1 (5 agents) | Phase 2 (clustering) | Phase 3 (synthesis) | **Total per run** |
+|--------|-------------------|---------------------|--------------------|--------------------|
+| **Opus** (Full) | ~$0.50 - $1.50 | ~$0.10 - $0.20 | ~$0.20 - $0.50 | **~$0.80 - $2.20** |
+| **Sonnet** (All) | ~$0.30 - $0.90 | ~$0.06 - $0.12 | ~$0.12 - $0.30 | **~$0.48 - $1.32** |
+| **Hybrid** | ~$0.25 - $0.75 | ~$0.02 - $0.04 | ~$0.20 - $0.50 | **~$0.47 - $1.29** |
+| **Haiku** (All) | ~$0.10 - $0.30 | ~$0.02 - $0.04 | ~$0.04 - $0.10 | **~$0.16 - $0.44** |
+
+Both layers: double the per-run cost. Failed runs still cost money. The default preset is Sonnet (All).
 
 ---
 
@@ -1370,3 +1423,25 @@ Both layers: ~$1.60 - $4.40. Failed runs still cost money.
 84. **Analytics: mention rate sample counts** — The per-event trade detail now shows mention rates with sample counts (e.g., `29% (10/34)` instead of just `29%`). The analytics API (`/api/analytics/performance`) updated to return `mentionYes` and `mentionTotal` alongside `historicalRate`. The `speakerMentionRates` map changed from `Map<string, number>` to `Map<string, { rate, yes, total }>` to carry the counts through.
 
 85. **Home page: right-clickable events** — "Researched Events" list items changed from `<button>` with `onClick`/`router.push()` to Next.js `<Link>` with `href`. Events can now be right-clicked to open in a new tab.
+
+### Phase 12: Hybrid Model Support & Retry Logic (Mar 2026)
+
+86. **Model preset system** — New `ModelPreset` type (`"opus" | "hybrid" | "sonnet" | "haiku"`) in `src/types/research.ts`. Added `modelPreset?: ModelPreset` to `OrchestratorInput`. The orchestrator's `getAgentModels(preset)` function maps presets to per-agent model assignments. Three model constants: `OPUS = "claude-opus-4-6"`, `SONNET = "claude-sonnet-4-5-20250929"`, `HAIKU = "claude-haiku-4-5-20251001"`.
+
+87. **Per-model pricing** — `src/lib/claude-client.ts` updated from hardcoded Opus 4.0 pricing ($15/$75 per MTok) to a `MODEL_PRICING` lookup table with accurate per-model rates: Opus 4.6 ($5/$25), Sonnet 4.5 ($3/$15), Haiku 4.5 ($1/$5). Default model changed from `claude-opus-4-0` to `claude-sonnet-4-5-20250929`.
+
+88. **Model parameter pass-through** — All 7 agent files (`historical.ts`, `agenda.ts`, `news-cycle.ts`, `event-format.ts`, `market-analysis.ts`, `clustering.ts`, `synthesizer.ts`) updated: added `model?: string` to each agent's input interface, passed through to `callAgentForJson()`. `AgentCallOptions` in `claude-client.ts` extended with optional `model` field.
+
+89. **Orchestrator model routing** — `src/agents/orchestrator.ts` added `getAgentModels()` function that returns an `AgentModelMap` (type `Record<AgentName, string>`) based on the selected preset. Hybrid preset uses Opus for synthesizer, Sonnet for research-heavy agents, Haiku for structural agents. Each agent call receives `model: models.<agentName>`.
+
+90. **Home page model dropdown** — `src/app/page.tsx` added a model preset dropdown next to the speaker selector. Four options with descriptions. Default: Sonnet (All). Selected preset passed as `?modelPreset=xxx` query parameter when navigating to the research page.
+
+91. **Research page model flow** — `src/app/research/[eventId]/page.tsx` reads `modelPreset` from `useSearchParams()` and includes it in the `POST /api/research/trigger` request body.
+
+92. **Trigger API model handling** — `src/app/api/research/trigger/route.ts` accepts `modelPreset` from request body, validates against `["opus", "hybrid", "sonnet", "haiku"]` (defaults to `"sonnet"`), saves to `research_runs.model_used` on insert, and passes to the orchestrator input.
+
+93. **Model tag display** — `src/components/research/RunHistory.tsx` shows a purple badge next to the status badge on each research run, displaying the model preset label (e.g., "Sonnet (All)", "Hybrid"). Uses `MODEL_PRESET_LABELS` map exported from `src/types/components.ts`. `ResearchRun` interface updated with `model_used: string | null` field.
+
+94. **Retry with exponential backoff** — `src/lib/claude-client.ts` added retry logic wrapping the `.stream().finalMessage()` call. `MAX_RETRIES = 4`, `BASE_DELAY_MS = 3000` (delays: 3s, 6s, 12s, 24s). `isRetryableError()` catches: Anthropic `APIError` status 429/500/502/503/529, `APIConnectionError` (status undefined), and any error string containing "overloaded", "rate_limit", "529", or "connection". Detailed logging: `[claude-client] API call failed (model=..., attempt X/Y, retryable=...): ...`.
+
+95. **Phase 1 failure logging** — `src/agents/orchestrator.ts` now logs Phase 1 agent failures with `[orchestrator] Phase 1 agent failed:` for easier debugging when individual agents fail within `Promise.allSettled()`.

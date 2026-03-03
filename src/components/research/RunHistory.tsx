@@ -1,4 +1,5 @@
 import type { ResearchRun } from "@/types/components";
+import { MODEL_PRESET_LABELS } from "@/types/components";
 
 interface RunHistoryProps {
   runs: ResearchRun[];
@@ -47,6 +48,11 @@ export function RunHistory({ runs, expandedRun, onExpandRun, onStopRun }: RunHis
                   >
                     {run.status}
                   </span>
+                  {run.model_used && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900/50 text-purple-400">
+                      {MODEL_PRESET_LABELS[run.model_used] ?? run.model_used}
+                    </span>
+                  )}
                   <span className="text-zinc-300 capitalize">{run.layer}</span>
                   <span className="text-zinc-500">
                     {new Date(run.triggered_at).toLocaleString()}

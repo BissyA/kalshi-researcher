@@ -7,6 +7,7 @@ interface ClusteringAgentInput {
   words: string[];
   historicalResult?: HistoricalResult;
   agendaResult?: AgendaResult;
+  model?: string;
 }
 
 export async function runClusteringAgent(
@@ -85,5 +86,6 @@ Analyze correlations between words and provide trading implications for each clu
     userMessage,
     maxTokens: 12000,
     enableWebSearch: false,
+    model: input.model,
   });
 }

@@ -26,6 +26,7 @@ interface SynthesizerInput {
   marketAnalysisResult: MarketAnalysisResult;
   clusterResult: ClusterResult;
   corpusMentionRates?: Record<string, CorpusMentionRate>;
+  model?: string;
 }
 
 export async function runSynthesizer(
@@ -183,5 +184,6 @@ Produce a score for EVERY word. Be precise, well-calibrated, and provide actiona
     userMessage,
     maxTokens: 32000,
     enableWebSearch: false,
+    model: input.model,
   });
 }

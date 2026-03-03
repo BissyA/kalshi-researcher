@@ -50,6 +50,7 @@ export interface ResearchRun {
   total_cost_cents: number | null;
   error_message: string | null;
   briefing: string | null;
+  model_used: string | null;
   historical_result: unknown | null;
   agenda_result: unknown | null;
   news_cycle_result: unknown | null;
@@ -58,6 +59,13 @@ export interface ResearchRun {
   cluster_result: unknown | null;
   synthesis_result: unknown | null;
 }
+
+export const MODEL_PRESET_LABELS: Record<string, string> = {
+  opus: "Opus (Full)",
+  hybrid: "Hybrid",
+  sonnet: "Sonnet (All)",
+  haiku: "Haiku (All)",
+};
 
 export interface ResearchSummary {
   historical: unknown;

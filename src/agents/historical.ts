@@ -16,6 +16,7 @@ interface HistoricalAgentInput {
   eventType: string;
   words: string[];
   cachedTranscripts?: CachedTranscript[];
+  model?: string;
 }
 
 export async function runHistoricalAgent(
@@ -88,5 +89,6 @@ Search for real transcripts and provide actual frequency data.`;
     userMessage,
     maxTokens: 16000,
     enableWebSearch: true,
+    model: input.model,
   });
 }

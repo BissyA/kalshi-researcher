@@ -2,15 +2,42 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const anthropic = new Anthropic();
 
-// Cost per million tokens (Claude Opus 4)
-const INPUT_COST_PER_M = 15.0;
-const OUTPUT_COST_PER_M = 75.0;
+// Per-model pricing (cost per million tokens)
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  "claude-opus-4-6": { input: 5.0, output: 25.0 },
+  "claude-sonnet-4-5-20250929": { input: 3.0, output: 15.0 },
+  "claude-haiku-4-5-20251001": { input: 1.0, output: 5.0 },
+};
+
+const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
+
+const MAX_RETRIES = 4;
+const BASE_DELAY_MS = 3000;
+
+function isRetryableError(err: unknown): boolean {
+  // Anthropic SDK errors with status codes
+  if (err instanceof Anthropic.APIError) {
+    // 429 = rate limited, 529 = overloaded, 500/502/503 = server errors
+    // APIConnectionError has status=undefined — also retry those
+    if (err.status === undefined) return true;
+    if ([429, 500, 502, 503, 529].includes(err.status)) return true;
+  }
+  // Catch any error containing retryable keywords regardless of type
+  // The streaming API may throw non-standard error shapes
+  const errStr = String(err instanceof Error ? err.message : JSON.stringify(err)).toLowerCase();
+  return errStr.includes("overloaded") || errStr.includes("rate_limit") || errStr.includes("529") || errStr.includes("connection");
+}
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface AgentCallOptions {
   systemPrompt: string;
   userMessage: string;
   maxTokens?: number;
   enableWebSearch?: boolean;
+  model?: string;
 }
 
 export interface AgentCallResult {
@@ -86,6 +113,7 @@ export async function callAgent(options: AgentCallOptions): Promise<AgentCallRes
     userMessage,
     maxTokens = 16000,
     enableWebSearch = true,
+    model = DEFAULT_MODEL,
   } = options;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -103,15 +131,36 @@ export async function callAgent(options: AgentCallOptions): Promise<AgentCallRes
   const MAX_CONTINUATIONS = 5; // safety limit for pause_turn resumptions
 
   for (let i = 0; i <= MAX_CONTINUATIONS; i++) {
-    const response = await anthropic.messages
-      .stream({
-        model: "claude-opus-4-0",
-        max_tokens: maxTokens,
-        system: systemPrompt,
-        tools: tools.length > 0 ? tools : undefined,
-        messages,
-      })
-      .finalMessage();
+    let response!: Anthropic.Messages.Message;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        response = await anthropic.messages
+          .stream({
+            model,
+            max_tokens: maxTokens,
+            system: systemPrompt,
+            tools: tools.length > 0 ? tools : undefined,
+            messages,
+          })
+          .finalMessage();
+        break;
+      } catch (err) {
+        const isRetryable = isRetryableError(err);
+        const errDetail = err instanceof Anthropic.APIError
+          ? `APIError status=${err.status} type=${err.error?.type ?? "unknown"}`
+          : err instanceof Error
+            ? `${err.constructor.name}: ${err.message}`
+            : JSON.stringify(err);
+        console.error(`[claude-client] API call failed (model=${model}, attempt ${attempt + 1}/${MAX_RETRIES + 1}, retryable=${isRetryable}): ${errDetail}`);
+        if (attempt < MAX_RETRIES && isRetryable) {
+          const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+          console.warn(`[claude-client] Retrying in ${delay}ms...`);
+          await sleep(delay);
+          continue;
+        }
+        throw err;
+      }
+    }
 
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;
@@ -139,9 +188,10 @@ export async function callAgent(options: AgentCallOptions): Promise<AgentCallRes
     break;
   }
 
+  const pricing = MODEL_PRICING[model] ?? MODEL_PRICING[DEFAULT_MODEL];
   const estimatedCostCents =
-    (totalInputTokens / 1_000_000) * INPUT_COST_PER_M * 100 +
-    (totalOutputTokens / 1_000_000) * OUTPUT_COST_PER_M * 100;
+    (totalInputTokens / 1_000_000) * pricing.input * 100 +
+    (totalOutputTokens / 1_000_000) * pricing.output * 100;
 
   return {
     content: finalTextContent,

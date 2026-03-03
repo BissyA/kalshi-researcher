@@ -7,6 +7,7 @@ interface AgendaAgentInput {
   eventDate: string;
   venue?: string;
   words: string[];
+  model?: string;
 }
 
 export async function runAgendaAgent(
@@ -77,5 +78,6 @@ Find real sources and provide evidence-based assessments.`;
     userMessage,
     maxTokens: 16000,
     enableWebSearch: true,
+    model: input.model,
   });
 }

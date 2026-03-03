@@ -16,9 +16,61 @@ import {
   NewsCycleResult,
   EventFormatResult,
   MarketAnalysisResult,
+  ModelPreset,
 } from "@/types/research";
 
 type ProgressCallback = (progress: ResearchProgress) => void;
+
+const OPUS = "claude-opus-4-6";
+const SONNET = "claude-sonnet-4-5-20250929";
+const HAIKU = "claude-haiku-4-5-20251001";
+
+type AgentModelMap = Record<AgentName, string>;
+
+function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
+  switch (preset) {
+    case "opus":
+      return {
+        historical: OPUS,
+        agenda: OPUS,
+        news_cycle: OPUS,
+        event_format: OPUS,
+        market_analysis: OPUS,
+        clustering: OPUS,
+        synthesizer: OPUS,
+      };
+    case "hybrid":
+      return {
+        historical: SONNET,
+        agenda: SONNET,
+        news_cycle: SONNET,
+        event_format: HAIKU,
+        market_analysis: SONNET,
+        clustering: HAIKU,
+        synthesizer: OPUS,
+      };
+    case "sonnet":
+      return {
+        historical: SONNET,
+        agenda: SONNET,
+        news_cycle: SONNET,
+        event_format: SONNET,
+        market_analysis: SONNET,
+        clustering: SONNET,
+        synthesizer: SONNET,
+      };
+    case "haiku":
+      return {
+        historical: HAIKU,
+        agenda: HAIKU,
+        news_cycle: HAIKU,
+        event_format: HAIKU,
+        market_analysis: HAIKU,
+        clustering: HAIKU,
+        synthesizer: HAIKU,
+      };
+  }
+}
 
 class CancelledError extends Error {
   constructor() {
@@ -45,6 +97,7 @@ export async function runResearchPipeline(
   onProgress?: ProgressCallback
 ): Promise<OrchestratorOutput> {
   const supabase = getServerSupabase();
+  const models = getAgentModels(input.modelPreset);
   const completedAgents: AgentName[] = [];
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
@@ -100,6 +153,7 @@ export async function runResearchPipeline(
           eventType: input.event.eventType,
           words: wordNames,
           cachedTranscripts: cachedTranscripts.length > 0 ? cachedTranscripts : undefined,
+          model: models.historical,
         }),
       },
       {
@@ -110,6 +164,7 @@ export async function runResearchPipeline(
           eventDate: input.event.eventDate,
           venue: input.event.venue,
           words: wordNames,
+          model: models.agenda,
         }),
       },
       {
@@ -119,6 +174,7 @@ export async function runResearchPipeline(
           eventTitle: input.event.title,
           eventDate: input.event.eventDate,
           venue: input.event.venue,
+          model: models.event_format,
         }),
       },
       {
@@ -130,6 +186,7 @@ export async function runResearchPipeline(
             word: w.word,
             yesPrice: w.yesPrice,
           })),
+          model: models.market_analysis,
         }),
       },
     ];
@@ -141,6 +198,7 @@ export async function runResearchPipeline(
         eventTitle: input.event.title,
         eventDate: input.event.eventDate,
         words: wordNames,
+        model: models.news_cycle,
       }),
     });
 
@@ -162,6 +220,8 @@ export async function runResearchPipeline(
     for (const r of results) {
       if (r.status === "fulfilled") {
         agentResults[r.value.name] = r.value.result.data;
+      } else {
+        console.error(`[orchestrator] Phase 1 agent failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
       }
     }
 
@@ -247,6 +307,7 @@ export async function runResearchPipeline(
       words: wordNames,
       historicalResult,
       agendaResult,
+      model: models.clustering,
     });
 
     completedAgents.push("clustering");
@@ -285,6 +346,7 @@ export async function runResearchPipeline(
       marketAnalysisResult,
       clusterResult: clusteringResult.data,
       corpusMentionRates: input.corpusMentionRates,
+      model: models.synthesizer,
     });
 
     completedAgents.push("synthesizer");

@@ -43,6 +43,7 @@ export default function HomePage() {
   const [researchLoading, setResearchLoading] = useState(false);
   const [speakers, setSpeakers] = useState<Array<{ id: string; name: string }>>([]);
   const [selectedSpeakerId, setSelectedSpeakerId] = useState("");
+  const [modelPreset, setModelPreset] = useState("sonnet");
 
   useEffect(() => {
     fetchPreviousEvents();
@@ -113,7 +114,7 @@ export default function HomePage() {
         body: JSON.stringify({ eventId: event.id, speakerId: selectedSpeakerId }),
       }).catch(() => {});
     }
-    router.push(`/research/${event.id}`);
+    router.push(`/research/${event.id}?modelPreset=${modelPreset}`);
   }
 
   return (
@@ -162,22 +163,40 @@ export default function HomePage() {
             </p>
           </div>
 
-          <div>
-            <label className="block text-sm text-zinc-400 mb-1">
-              Speaker
-            </label>
-            <select
-              value={selectedSpeakerId}
-              onChange={(e) => setSelectedSpeakerId(e.target.value)}
-              className="w-full max-w-xs px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
-            >
-              <option value="">None (no corpus data)</option>
-              {speakers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
+          <div className="flex gap-6">
+            <div>
+              <label className="block text-sm text-zinc-400 mb-1">
+                Speaker
+              </label>
+              <select
+                value={selectedSpeakerId}
+                onChange={(e) => setSelectedSpeakerId(e.target.value)}
+                className="w-full max-w-xs px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="">None (no corpus data)</option>
+                {speakers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm text-zinc-400 mb-1">
+                Model Preset
+              </label>
+              <select
+                value={modelPreset}
+                onChange={(e) => setModelPreset(e.target.value)}
+                className="w-full max-w-xs px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="opus">Opus (Full) — highest quality</option>
+                <option value="hybrid">Hybrid — Opus synthesizer, Sonnet/Haiku agents</option>
+                <option value="sonnet">Sonnet (All) — good balance</option>
+                <option value="haiku">Haiku (All) — cheapest</option>
+              </select>
+            </div>
           </div>
 
           {/* Word List Preview */}

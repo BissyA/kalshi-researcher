@@ -6,6 +6,7 @@ interface NewsCycleAgentInput {
   eventTitle: string;
   eventDate: string;
   words: string[];
+  model?: string;
 }
 
 export async function runNewsCycleAgent(
@@ -72,5 +73,6 @@ Focus on the last 72 hours of news and statements.`;
     userMessage,
     maxTokens: 16000,
     enableWebSearch: true,
+    model: input.model,
   });
 }

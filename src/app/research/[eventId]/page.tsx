@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, use, useMemo } from "react";
+import { useSearchParams } from "next/navigation";
 import { useLivePrices } from "@/hooks/useLivePrices";
 import type {
   Event,
@@ -40,6 +41,8 @@ export default function ResearchDashboard({
   params: Promise<{ eventId: string }>;
 }) {
   const { eventId } = use(params);
+  const searchParams = useSearchParams();
+  const modelPreset = searchParams.get("modelPreset") || "sonnet";
 
   // ── Core state ──
   const [event, setEvent] = useState<Event | null>(null);
@@ -193,7 +196,7 @@ export default function ResearchDashboard({
       const res = await fetch("/api/research/trigger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId, layer, speakerId: selectedSpeakerId || undefined }),
+        body: JSON.stringify({ eventId, layer, speakerId: selectedSpeakerId || undefined, modelPreset }),
       });
 
       if (!res.ok || !res.body) {

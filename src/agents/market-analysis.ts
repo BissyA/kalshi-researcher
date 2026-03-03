@@ -8,6 +8,7 @@ interface MarketAnalysisAgentInput {
     word: string;
     yesPrice: number;
   }>;
+  model?: string;
 }
 
 export async function runMarketAnalysisAgent(
@@ -77,5 +78,6 @@ Identify mispricings, correlated pairs, and what the market is implying about ex
     userMessage,
     maxTokens: 12000,
     enableWebSearch: false, // Pure analysis, no web search needed
+    model: input.model,
   });
 }

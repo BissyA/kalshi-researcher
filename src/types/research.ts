@@ -181,6 +181,8 @@ export interface CorpusMentionRate {
 
 // ── Orchestrator Types ──
 
+export type ModelPreset = "opus" | "hybrid" | "sonnet" | "haiku";
+
 export interface OrchestratorInput {
   event: {
     id: string;
@@ -199,6 +201,7 @@ export interface OrchestratorInput {
     noPrice: number;
   }>;
   layer: "baseline" | "current";
+  modelPreset?: ModelPreset;
   existingResearch?: {
     historicalResult?: HistoricalResult;
     agendaResult?: AgendaResult;
