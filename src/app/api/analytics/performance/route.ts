@@ -51,7 +51,7 @@ export async function GET() {
 
   // For each speaker, find their series, then query event_results + words to compute mention rates
   // Map: speakerId → Map<normalizedWord, mentionRate>
-  const speakerMentionRates = new Map<string, Map<string, number>>();
+  const speakerMentionRates = new Map<string, Map<string, { rate: number; yes: number; total: number }>>();
 
   for (const speakerId of speakerIds) {
     const { data: seriesData } = await supabase
@@ -99,10 +99,10 @@ export async function GET() {
       wordStats.set(norm, entry);
     }
 
-    // Convert to mention rate map
-    const rateMap = new Map<string, number>();
+    // Convert to mention rate map (with sample counts)
+    const rateMap = new Map<string, { rate: number; yes: number; total: number }>();
     for (const [word, stats] of wordStats) {
-      rateMap.set(word, stats.total > 0 ? stats.yes / stats.total : 0);
+      rateMap.set(word, { rate: stats.total > 0 ? stats.yes / stats.total : 0, yes: stats.yes, total: stats.total });
     }
     speakerMentionRates.set(speakerId, rateMap);
   }
@@ -122,7 +122,7 @@ export async function GET() {
 
     const trades = eventAllTrades.map((t) => {
       const wordName = wordMap.get(t.word_id) ?? "Unknown";
-      const historicalRate = rateMap?.get(wordName.toLowerCase()) ?? null;
+      const mention = rateMap?.get(wordName.toLowerCase()) ?? null;
       const entryPrice = t.entry_price as number;
 
       return {
@@ -134,8 +134,10 @@ export async function GET() {
         pnlCents: (t.pnl_cents ?? 0) as number,
         agentEdge: t.agent_edge as number | null,
         agentProbability: t.agent_estimated_probability as number | null,
-        historicalRate,
-        historicalEdge: historicalRate != null ? historicalRate - entryPrice : null,
+        historicalRate: mention?.rate ?? null,
+        mentionYes: mention?.yes ?? null,
+        mentionTotal: mention?.total ?? null,
+        historicalEdge: mention != null ? mention.rate - entryPrice : null,
       };
     });
 

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 interface LoadedEvent {
   id: string;
@@ -219,10 +220,10 @@ export default function HomePage() {
           </h2>
           <div className="space-y-2">
             {previousEvents.map((ev) => (
-              <button
+              <Link
                 key={ev.id}
-                onClick={() => router.push(`/research/${ev.id}`)}
-                className="w-full text-left px-4 py-3 bg-zinc-900/50 border border-zinc-800 rounded-lg hover:border-zinc-600 transition-colors"
+                href={`/research/${ev.id}`}
+                className="block w-full text-left px-4 py-3 bg-zinc-900/50 border border-zinc-800 rounded-lg hover:border-zinc-600 transition-colors"
               >
                 <div className="flex items-center justify-between">
                   <div>
@@ -250,7 +251,7 @@ export default function HomePage() {
                     </span>
                   </div>
                 </div>
-              </button>
+              </Link>
             ))}
           </div>
         </div>

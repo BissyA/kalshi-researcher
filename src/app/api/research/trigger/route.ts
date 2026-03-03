@@ -216,7 +216,7 @@ export async function POST(request: Request) {
                 (m: { ticker: string }) => m.ticker === word.ticker
               );
               if (market) {
-                word.yesPrice = parseFloat(market.yes_bid_dollars) || 0.5;
+                word.yesPrice = parseFloat(market.yes_ask_dollars) || 0.5;
                 word.noPrice = parseFloat(market.no_bid_dollars) || 0.5;
               }
             }

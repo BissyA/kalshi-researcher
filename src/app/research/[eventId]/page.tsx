@@ -468,6 +468,7 @@ export default function ResearchDashboard({
             trades={trades}
             wordScores={wordScores}
             words={words}
+            onTradeUpdated={fetchData}
           />
 
           <ResolveEvent

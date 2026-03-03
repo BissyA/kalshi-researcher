@@ -191,7 +191,7 @@ export function QuickAnalysisTab({ mentionData, speakerId }: QuickAnalysisTabPro
   const rows = useMemo(() => {
     return words.map((w) => {
       const live = livePrices[w.marketTicker];
-      const currentPrice = live ? live.yesBid : w.yesBid;
+      const currentPrice = live ? live.yesAsk : w.yesAsk;
       const currentAsk = live ? live.yesAsk : w.yesAsk;
       const mention = mentionRateMap.get(w.word.toLowerCase());
       const historicalRate = mention?.rate ?? null;

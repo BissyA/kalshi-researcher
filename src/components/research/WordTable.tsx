@@ -67,7 +67,7 @@ export function WordTable({
     return wordScores.map((ws): WordRow => {
       const ticker = ws.words?.kalshi_market_ticker ?? "";
       const live = livePrices[ticker];
-      const currentPrice = live ? live.yesBid : ws.market_yes_price;
+      const currentPrice = live ? live.yesAsk : ws.market_yes_price;
 
       const wordName = ws.words?.word ?? "";
       const mention = mentionRateMap.get(wordName.toLowerCase());

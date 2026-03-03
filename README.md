@@ -48,7 +48,7 @@ This tool:
 7. **Streams live prices** via WebSocket from Kalshi
 8. **Logs trades** with inline forms on the research dashboard
 9. **Auto-settles trades** by polling Kalshi's market resolution API
-10. **Tracks performance** with Recharts charts on the analytics page
+10. **Tracks performance** on the analytics page with EV calculation and per-event trade breakdowns
 11. **Tracks word mention rates** across all historical Kalshi events per speaker via the Corpus page
 12. **Manages Kalshi market series** — search and add series from the Kalshi API, import historical settled events, refresh data per-series
 13. **Quick Analysis** — paste a Kalshi mention market URL to instantly compare live market prices against historical mention rates, with WebSocket live price updates, saved search persistence, and edge detection
@@ -71,7 +71,7 @@ The research happens in two layers:
 - Corpus page: speaker management, series import (KXTRUMPMENTION — 114 events, KXTRUMPMENTIONB — 57 events, KXBUSINESSROUNDTABLE — 1 event), mention history with expandable per-event detail
 - Historical data import from Kalshi API with pagination (handles 100+ events)
 - Speaker persistence: select speaker in research page WordTable → saves to event record → analytics pulls corpus historical rates for that speaker
-- Analytics expandable trade detail with corpus-based mention rates and edge calculations
+- Analytics expandable trade detail with corpus-based mention rates (with sample counts), edge calculations, and EV card
 - Quick Analysis tab: paste URL → live price vs historical rate comparison with WebSocket updates and saved searches
 - News Cycle agent runs on both baseline and current layers
 - Corpus data injection: selected speaker's settled Kalshi mention rates fed into synthesizer as empirical base rates
@@ -208,6 +208,7 @@ kalshi-research/
             │
             ├── trades/
             │   ├── log/route.ts          # POST: log a trade
+            │   ├── [tradeId]/route.ts    # PATCH: edit a trade (entry price, contracts) with P&L recalc
             │   └── results/route.ts      # POST: manual resolution
             │
             ├── settlement/
@@ -404,9 +405,9 @@ Logged trades for performance tracking.
 | event_id | uuid (FK → events) | |
 | word_id | uuid (FK → words) | |
 | side | text | 'yes' or 'no' |
-| entry_price | real | 0.00-1.00 scale |
-| contracts | integer | Default: 1 |
-| total_cost_cents | integer | entry_price * contracts * 100 |
+| entry_price | real | 0.00-1.00 scale. Editable after logging via `PATCH /api/trades/[tradeId]` |
+| contracts | integer | Default: 1. Editable after logging via `PATCH /api/trades/[tradeId]` |
+| total_cost_cents | integer | entry_price * contracts * 100. Auto-recalculated on edit |
 | agent_estimated_probability | real | Model's estimate at trade time |
 | agent_edge | real | Estimated edge at trade time |
 | result | text | NULL until resolved, then 'win' or 'loss' |
@@ -769,6 +770,7 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/trades/log` | POST | Log a trade with agent probability |
+| `/api/trades/[tradeId]` | PATCH | Edit a trade's entry price and/or contracts. Recalculates `total_cost_cents`. If trade is already settled, recalculates `pnl_cents` using same formula as `settlement.ts`. |
 | `/api/trades/results` | POST | Manual event resolution |
 | `/api/settlement/check` | POST | Auto-settle via Kalshi API polling |
 
@@ -816,7 +818,7 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 - Displays event details: title, ticker, word count
 - Shows grid of all word contracts with current YES prices
 - "Start Research" button — persists the selected speaker to the event record via `PATCH /api/events/speaker`, then navigates to the research page. The speaker selection flows through to the research trigger API which fetches corpus data for the synthesizer.
-- **"Researched Events" list** at the bottom — only shows events that have at least one research run (filtered via `/api/events/list` which queries `research_runs` table). Corpus-imported events without research runs are excluded entirely.
+- **"Researched Events" list** at the bottom — only shows events that have at least one research run (filtered via `/api/events/list` which queries `research_runs` table). Corpus-imported events without research runs are excluded entirely. Uses Next.js `<Link>` components (not `<button>`) so items are right-clickable to open in a new tab.
 
 ### Research Dashboard (`/research/[eventId]`)
 The main working page for tactical research on a specific upcoming Kalshi mention market event. Tabbed layout with extracted components.
@@ -852,7 +854,7 @@ The main working page for tactical research on a specific upcoming Kalshi mentio
 
   Sources with URLs are clickable. Summary badges at the top show counts per type. The `extractSources()` helper function (exported from `SourcesTab.tsx`) handles the extraction logic.
 
-**Trade Log tab**: WordScoresTable (with inline trade forms), LoggedTrades, ResolveEvent
+**Trade Log tab**: WordScoresTable (with inline trade forms), LoggedTrades (with inline editing), ResolveEvent
 
 ### Corpus Page (`/corpus`)
 Strategic analytics page for long-term speaker data, completely separate from individual research runs. All data here comes from Kalshi's settled market results (ground truth), not from AI agent analysis.
@@ -892,17 +894,14 @@ Strategic analytics page for long-term speaker data, completely separate from in
 - **localStorage format**: `kalshi-quick-analysis-{speakerId}` stores `SavedSearch[]` where each entry is `{ url, eventTitle, eventTicker }`. Handles migration from older single-object format.
 
 ### Analytics Page (`/analytics`)
-- **Overall Stats cards**: Total trades, wins, losses, win rate, total P&L (resolved trades only)
+- **Overall Stats cards** (6 cards): Total trades, wins, losses, win rate, total P&L, **EV** (resolved trades only). EV = expected value per trade = `totalPnlCents / totalTrades` (in dollars). EV color: green when positive, red when negative.
 - **Per-Event Performance table**: Only shows events with at least one trade (corpus-only events excluded). Columns: Event, Date, Trades, W/L, Win Rate, P&L.
   - **Expandable rows** — click any event to expand and see individual trade detail. Chevron (▶) rotates 90° when expanded.
   - **Trade detail sub-table** (8 columns): Word, Side (YES/NO pill), Entry Price, Contracts, Mention Rate, Edge, Result (W/L), P&L.
-  - **Mention Rate** = historical corpus mention rate (from `event_results` settled data via the event's `speaker_id` linkage). NOT the AI synthesizer's `combined_probability`. Shows "-" if no speaker is linked.
+  - **Mention Rate** = historical corpus mention rate with sample counts. Displayed as `29% (10/34)` where 10 = times mentioned, 34 = total events in corpus. Data from `event_results` settled data via the event's `speaker_id` linkage. NOT the AI synthesizer's `combined_probability`. Shows "-" if no speaker is linked.
   - **Edge** = `historical_rate - entry_price`. Color-coded: green for positive (underpriced), red for negative (overpriced). Shows "-" if no speaker is linked.
-  - **Data flow for historical rates**: `events.speaker_id` → `series` (where `speaker_id` matches) → all corpus `events` in those series → `event_results` joined with `words` → group by normalized word → `mentionRate = mentioned / total`. Paginated to handle Supabase 1000-row limit.
-- **Calibration Chart**: Agent probability buckets vs actual mention outcomes (from `word_scores` + `event_results`)
-- **Edge vs P&L Chart**: Average P&L by agent edge bucket
-- **P&L by Event Chart**: Bar chart of P&L per event over time
-- Dark theme Recharts charts with custom DarkTooltip component
+  - **Data flow for historical rates**: `events.speaker_id` → `series` (where `speaker_id` matches) → all corpus `events` in those series → `event_results` joined with `words` → group by normalized word → `{ rate, yes, total }`. The analytics API returns `historicalRate`, `mentionYes`, and `mentionTotal` per trade. Paginated to handle Supabase 1000-row limit.
+- **Removed sections** (previously existed, removed to simplify): Calibration Chart, Edge vs P&L Chart, P&L by Event Chart, Recharts dependency no longer used on this page.
 
 ---
 
@@ -1018,12 +1017,22 @@ Browser (EventSource) → /api/ws/prices (SSE) → Kalshi WebSocket (wss://...)
 
 Client hook: `const { prices, status, lastUpdate } = useLivePrices(marketTickers);`
 
+**Price field usage**: The WebSocket ticker messages contain both `yes_bid_dollars` (highest bid) and `yes_ask_dollars` (lowest ask). The app uses `yesAsk` for all market price displays and edge calculations — this is the actual cost to enter a YES position. The `yesBid` field is available in the `PriceData` type but not used for display (it was incorrectly used prior to the Phase 11 fix).
+
 ---
 
 ## Trade Logging & Settlement
 
 ### Trade Flow
 1. Log trade → 2. Wait for event → 3. Check settlement (polls Kalshi API) → 4. Auto-resolve → 5. View analytics
+
+### Trade Editing
+Trades can be edited after logging (including after settlement). Click on the Entry or Qty values in the LoggedTrades table to edit inline. On save, `PATCH /api/trades/[tradeId]` updates the trade record:
+- Recalculates `total_cost_cents = Math.round(entryPrice * contracts * 100)`
+- If trade is already settled (`result` is not null), recalculates `pnl_cents` using the same formula from `settlement.ts`:
+  - Win: `Math.round((1.0 - entry_price) * contracts * 100)`
+  - Loss: `-Math.round(entry_price * contracts * 100)`
+- Parent page refetches all data so analytics and P&L summaries update immediately
 
 ### Settlement Details
 Kalshi market lifecycle: `active` → `closed` → `determined` → `finalized`. Settlement triggers only when ALL markets for an event have results and zero API errors.
@@ -1089,7 +1098,7 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - Live WebSocket price streaming via SSE proxy
 - Trade logging with inline forms
 - Automatic and manual settlement
-- Recharts analytics charts with expandable per-event trade detail, corpus-based historical mention rates and edge
+- Analytics page with EV card, expandable per-event trade detail, corpus-based historical mention rates with sample counts, and edge calculations. Recharts charts (calibration, edge vs P&L, P&L by event) removed to simplify.
 - Run cancellation
 - **Corpus page** with 3 tabs:
   - Mention History: cross-event word mention rates with searchable, sortable, expandable per-event detail (827+ data points across 116 events). Word search filter, reset sort button. Data from Kalshi settled markets (ground truth).
@@ -1341,3 +1350,23 @@ Both layers: ~$1.60 - $4.40. Failed runs still cost money.
 78. **Research page speaker wiring** — `src/app/research/[eventId]/page.tsx` passes speaker data to EventHeader. The `triggerResearch` function sends `speakerId: selectedSpeakerId || undefined` in the request body. The `onSpeakerChange` callback persists changes via `PATCH /api/events/speaker`.
 
 79. **End-to-end speaker flow** — Established the recommended flow: Select speaker on home page → Load event → Start Research → speaker persists to event → trigger API fetches corpus data → synthesizer uses empirical rates → WordTable auto-loads corpus for that speaker → analytics gets speaker linkage for historical rate comparison. The speaker dropdown on EventHeader allows mid-session changes without going back to the home page.
+
+### Phase 11: Price Fix, Trade Editing, Analytics Improvements (Mar 2026)
+
+80. **Market price fix: bid → ask** — All market price displays and edge calculations were incorrectly using `yes_bid_dollars` (the highest bid — what buyers are offering) instead of `yes_ask_dollars` (the lowest ask — what you'd actually pay to buy YES). This caused massively overstated edge values. For example, "Midnight Hammer" showed 10¢ (bid) instead of 85¢ (ask), making edge appear as +90% when it was really ~+15%. Fixed in 6 files:
+    - `src/components/research/WordAnalysisTable.tsx` — `getLivePrice()` now returns `yesAsk` instead of `yesBid`
+    - `src/components/research/WordScoresTable.tsx` — same fix
+    - `src/components/research/WordTable.tsx` — `currentPrice` now uses `live.yesAsk`
+    - `src/components/corpus/QuickAnalysisTab.tsx` — `currentPrice` now uses `live.yesAsk` with fallback to `w.yesAsk`
+    - `src/app/api/events/load/route.ts` — `yesPrice` now uses `yes_ask_dollars` (initial load)
+    - `src/app/api/research/trigger/route.ts` — `yesPrice` now uses `yes_ask_dollars` (research pipeline)
+
+81. **Analytics: removed chart sections** — Removed Calibration (Agent Probability vs Actual), Edge vs P&L, and P&L by Event chart sections from the analytics page. All associated Recharts imports, interfaces (`CalibrationBucket`, `EdgeBucket`), state variables (`calibrationData`, `edgeAnalysis`), data transformations, and the `DarkTooltip` component were cleaned up. The analytics page now shows only the summary stats cards and per-event performance table.
+
+82. **Analytics: EV card** — Added an "EV" (Expected Value) summary card to the analytics page, positioned after Total P&L. Calculates EV per trade as `totalPnlCents / totalTrades` (equivalent to `(winRate × avgWin) - (lossRate × avgLoss)`). Displayed in dollars, color-coded green/red. Grid changed from 5 to 6 columns to accommodate.
+
+83. **Trade editing** — New `PATCH /api/trades/[tradeId]` endpoint (`src/app/api/trades/[tradeId]/route.ts`). Accepts `{ entryPrice?, contracts? }`. Updates the trade record, recalculates `total_cost_cents`, and if the trade is already settled, recalculates `pnl_cents` using the same formula from `settlement.ts`. `LoggedTrades.tsx` updated with inline editing: click Entry or Qty to edit → input fields appear → Enter to save, Escape to cancel, or use checkmark/X buttons. On save, calls the PATCH endpoint and triggers a parent refetch via new `onTradeUpdated` callback prop. This allows correcting entry prices and quantities even after settlement, with P&L automatically recalculated.
+
+84. **Analytics: mention rate sample counts** — The per-event trade detail now shows mention rates with sample counts (e.g., `29% (10/34)` instead of just `29%`). The analytics API (`/api/analytics/performance`) updated to return `mentionYes` and `mentionTotal` alongside `historicalRate`. The `speakerMentionRates` map changed from `Map<string, number>` to `Map<string, { rate, yes, total }>` to carry the counts through.
+
+85. **Home page: right-clickable events** — "Researched Events" list items changed from `<button>` with `onClick`/`router.push()` to Next.js `<Link>` with `href`. Events can now be right-clicked to open in a new tab.

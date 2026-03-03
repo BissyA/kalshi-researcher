@@ -47,7 +47,7 @@ export function WordScoresTable({
   function getLivePrice(score: WordScore): number | null {
     const ticker = score.words?.kalshi_market_ticker;
     if (!ticker || !livePrices[ticker]) return null;
-    return livePrices[ticker].yesBid;
+    return livePrices[ticker].yesAsk;
   }
 
   function handleSort(key: SortKey) {

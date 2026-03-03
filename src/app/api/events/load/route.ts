@@ -116,7 +116,7 @@ export async function POST(request: Request) {
         id: w.id,
         ticker: w.kalshi_market_ticker,
         word: w.word,
-        yesPrice: market ? parseFloat(market.yes_bid_dollars) : 0,
+        yesPrice: market ? parseFloat(market.yes_ask_dollars) : 0,
         noPrice: market ? parseFloat(market.no_bid_dollars) : 0,
         yesAsk: market ? parseFloat(market.yes_ask_dollars) : 0,
         lastPrice: market ? parseFloat(market.last_price_dollars) : 0,
