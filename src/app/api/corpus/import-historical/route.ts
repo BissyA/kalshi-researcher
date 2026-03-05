@@ -16,6 +16,8 @@ interface KalshiMarket {
 interface KalshiEvent {
   event_ticker: string;
   title: string;
+  sub_title?: string;
+  strike_date?: string | null;
   markets?: KalshiMarket[];
 }
 
@@ -132,7 +134,18 @@ export async function POST(request: Request) {
         }
 
         const eventType = inferEventType(kalshiEvent.title);
-        const eventDate = settledMarkets[0]?.close_time ?? null;
+        // Parse actual event date from sub_title, fall back to strike_date / close_time
+        let eventDate: string | null = null;
+        if (kalshiEvent.sub_title) {
+          const cleaned = kalshiEvent.sub_title.replace(/^On\s+/i, "");
+          const parsed = new Date(cleaned);
+          if (!isNaN(parsed.getTime())) {
+            eventDate = parsed.toISOString();
+          }
+        }
+        if (!eventDate) {
+          eventDate = kalshiEvent.strike_date ?? settledMarkets[0]?.close_time ?? null;
+        }
 
         // Upsert event — speaker comes from the series record, NOT inferred
         const { data: dbEvent, error: eventError } = await supabase

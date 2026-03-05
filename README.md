@@ -25,6 +25,7 @@ AI-powered research tool for Kalshi "mention markets" — prediction contracts o
 - [Live Prices (WebSocket)](#live-prices-websocket)
 - [Trade Logging & Settlement](#trade-logging--settlement)
 - [How to Run](#how-to-run)
+- [Deployment (Fly.io)](#deployment-flyio)
 - [Two-Layer Research Model](#two-layer-research-model)
 - [Relationship to Speed Trader](#relationship-to-speed-trader)
 - [Current Status & Known Issues](#current-status--known-issues)
@@ -97,6 +98,7 @@ The research happens in two layers:
 | WebSocket | `ws` (server-side Kalshi WS client) | ^8.19.0 |
 | Fonts | Geist Sans + Geist Mono | via `next/font` |
 | API Client | Kalshi REST API v2 + WebSocket v2 | RSA-PSS auth |
+| Deployment | Fly.io (Docker, Singapore region) | shared-cpu-1x, 512MB |
 
 ---
 
@@ -104,12 +106,15 @@ The research happens in two layers:
 
 ```
 kalshi-research/
-├── kalshi-key.pem                # RSA private key for Kalshi API auth
+├── kalshi-key.pem                # RSA private key for Kalshi API auth (local dev only)
 ├── .env.local                    # All API keys (not committed)
 ├── CLAUDE.md                     # AI builder instructions (references OpenAPI spec)
 ├── package.json
 ├── tsconfig.json                 # strict mode, @/* → ./src/*
-├── next.config.ts
+├── next.config.ts                # output: "standalone" for Docker deployment
+├── Dockerfile                    # Multi-stage Node 22 Alpine build for Fly.io
+├── .dockerignore                 # Excludes node_modules, .next, .git, .env*, *.pem
+├── fly.toml                      # Fly.io config: sin region, 512MB, auto-stop/start
 │
 ├── docs/
 │   └── kalshi-openapi.yaml       # Full Kalshi OpenAPI spec (6923 lines)
@@ -120,7 +125,8 @@ kalshi-research/
 │       ├── 002_rls_policies.sql      # RLS + anon read policies
 │       ├── 003_dashboard_redesign.sql # briefing column, word_frequencies, cancelled status
 │       ├── 004_speakers_and_series.sql # speakers + series tables, events.series_id FK
-│       └── 005_event_speaker_id.sql   # events.speaker_id FK to speakers table
+│       ├── 005_event_speaker_id.sql   # events.speaker_id FK to speakers table
+│       └── 006_excluded_tickers.sql   # excluded_tickers TEXT[] on series table
 │
 └── src/
     ├── types/
@@ -1104,6 +1110,74 @@ npm run build
 
 ---
 
+## Deployment (Fly.io)
+
+The app is deployed to **Fly.io** in the **Singapore (`sin`) region** using a Docker-based standalone Next.js build.
+
+**Live URL**: `https://kalshi-research.fly.dev/`
+
+### Deployment Files
+
+| File | Purpose |
+|------|---------|
+| `fly.toml` | Fly.io app config — region `sin`, port 3000, shared-cpu-1x, 512MB RAM, auto-stop/start |
+| `Dockerfile` | Multi-stage Node 22 Alpine build — deps → build → standalone runner |
+| `.dockerignore` | Excludes `node_modules`, `.next`, `.git`, `.env*`, `*.pem`, `*.md` |
+
+### Key Configuration
+
+- **`next.config.ts`**: `output: "standalone"` — required for Docker deployment. Produces a self-contained build with `server.js` entry point.
+- **`src/lib/supabase.ts`**: Lazy initialization via `getServerSupabase()` function — the Supabase client is created at runtime, not at module load time. This prevents build failures when env vars aren't available during Docker build.
+- **`fly.toml`**: Auto-stop machines when idle (`auto_stop_machines = 'stop'`), auto-start on request. Health check on `/` every 30s.
+
+### Fly Secrets
+
+All environment variables are set as Fly secrets (not baked into the Docker image):
+
+```bash
+fly secrets set \
+  KALSHI_API_KEY="<uuid>" \
+  KALSHI_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----" \
+  ANTHROPIC_API_KEY="sk-ant-..." \
+  NEXT_PUBLIC_SUPABASE_URL="https://<ref>.supabase.co" \
+  NEXT_PUBLIC_SUPABASE_ANON_KEY="<jwt>" \
+  SUPABASE_SERVICE_ROLE_KEY="<jwt>"
+```
+
+**Important**: Use `KALSHI_PRIVATE_KEY` (raw PEM content), not `KALSHI_PRIVATE_KEY_PATH` — there's no local file in the container. The `kalshi-client.ts` checks `KALSHI_PRIVATE_KEY` first, falls back to file path.
+
+### Deploy Commands
+
+```bash
+# Deploy latest code
+fly deploy
+
+# View logs
+fly logs
+
+# Check app status
+fly status
+
+# SSH into running machine
+fly ssh console
+
+# Update a secret
+fly secrets set KEY=value
+```
+
+### SSE Keepalive for Long-Running Requests
+
+The research pipeline's synthesizer step can take 60-120+ seconds (32K token output from Claude). Fly.io's proxy kills idle HTTP connections after ~60 seconds. The SSE stream in `/api/research/trigger` sends `: keepalive\n\n` comments every 15 seconds to prevent the proxy from closing the connection. This is a standard SSE comment (colon-prefixed lines are ignored by `EventSource` clients).
+
+### Architecture Notes
+
+- **No custom server**: Uses Next.js built-in standalone server (`node server.js`). No Express/Hono required.
+- **WebSocket proxy**: The `/api/ws/prices` route connects to Kalshi's WebSocket API server-side and forwards updates as SSE to the browser. Fly.io supports this natively via HTTP keep-alive. The WS route already has its own 30s keepalive interval.
+- **NEXT_PUBLIC_ vars**: `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are embedded into the client bundle at build time on Fly's build servers. Since they're set as Fly secrets before the first deploy, they're available during build. If you change these values, you must redeploy (not just restart).
+- **VM sizing**: Currently shared-cpu-1x with 512MB RAM. The app is I/O bound (waiting on Claude API, Kalshi API, Supabase). If you see OOM errors, bump to 1GB with `fly scale memory 1024`.
+
+---
+
 ## Two-Layer Research Model
 
 ### Baseline Layer (Comprehensive)
@@ -1445,3 +1519,15 @@ Both layers: double the per-run cost. Failed runs still cost money. The default 
 94. **Retry with exponential backoff** — `src/lib/claude-client.ts` added retry logic wrapping the `.stream().finalMessage()` call. `MAX_RETRIES = 4`, `BASE_DELAY_MS = 3000` (delays: 3s, 6s, 12s, 24s). `isRetryableError()` catches: Anthropic `APIError` status 429/500/502/503/529, `APIConnectionError` (status undefined), and any error string containing "overloaded", "rate_limit", "529", or "connection". Detailed logging: `[claude-client] API call failed (model=..., attempt X/Y, retryable=...): ...`.
 
 95. **Phase 1 failure logging** — `src/agents/orchestrator.ts` now logs Phase 1 agent failures with `[orchestrator] Phase 1 agent failed:` for easier debugging when individual agents fail within `Promise.allSettled()`.
+
+### Phase 13: Fly.io Deployment (Mar 2026)
+
+96. **Fly.io deployment** — Deployed the app to Fly.io in the Singapore (`sin`) region. Created `Dockerfile` (multi-stage Node 22 Alpine build), `.dockerignore`, and `fly.toml`. App config: shared-cpu-1x, 512MB RAM, auto-stop when idle, auto-start on request, health check on `/` every 30s. Live at `https://kalshi-research.fly.dev/`.
+
+97. **Standalone Next.js output** — Added `output: "standalone"` to `next.config.ts`. Required for Docker-based deployments — produces a self-contained build with `node server.js` entry point, minimal `node_modules`, and no dependency on the full `node_modules` tree.
+
+98. **Lazy Supabase client initialization** — `src/lib/supabase.ts` rewritten from module-level `createClient()` to a lazy `getServerSupabase()` function. The original code called `createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, ...)` at import time, which crashed during Docker builds when env vars aren't available (Next.js collects page data during `next build`). All 23 consuming files already imported `getServerSupabase` — the unused `export const supabase` and `getSupabase()` were removed entirely.
+
+99. **SSE keepalive for research trigger** — `src/app/api/research/trigger/route.ts` now sends `: keepalive\n\n` SSE comments every 15 seconds on the progress stream. Fixes "network error" during the synthesizer step — the synthesizer API call takes 60-120+ seconds (32K max tokens), during which no progress events were sent, causing Fly.io's proxy to kill the idle connection after ~60s. The keepalive is a standard SSE comment (colon-prefixed) that `EventSource` clients silently ignore. Interval is cleared on stream close.
+
+100. **Fly secrets configuration** — All 6 environment variables set as Fly secrets: `KALSHI_API_KEY`, `KALSHI_PRIVATE_KEY` (raw PEM content, not file path), `ANTHROPIC_API_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. Secrets are injected at runtime, not baked into the Docker image.

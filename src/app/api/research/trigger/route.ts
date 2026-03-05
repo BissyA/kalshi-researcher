@@ -181,6 +181,21 @@ export async function POST(request: Request) {
           }
         };
 
+        // Send SSE comments every 15s to keep the connection alive
+        // through proxies (Fly.io kills idle connections after ~60s)
+        const keepalive = setInterval(() => {
+          if (controllerClosed) {
+            clearInterval(keepalive);
+            return;
+          }
+          try {
+            controller.enqueue(encoder.encode(": keepalive\n\n"));
+          } catch {
+            controllerClosed = true;
+            clearInterval(keepalive);
+          }
+        }, 15_000);
+
         const orchestratorInput: OrchestratorInput = {
           event: {
             id: event.id,
@@ -260,6 +275,7 @@ export async function POST(request: Request) {
           });
         }
 
+        clearInterval(keepalive);
         if (!controllerClosed) {
           try {
             controller.close();

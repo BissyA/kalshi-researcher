@@ -1,0 +1,10 @@
+Dockerfile
+.dockerignore
+node_modules
+.next
+.git
+.gitignore
+.env*
+*.pem
+*.md
+fly.toml

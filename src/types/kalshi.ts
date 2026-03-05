@@ -2,9 +2,10 @@ export interface KalshiEvent {
   event_ticker: string;
   series_ticker: string;
   title: string;
-  sub_title: string;
+  sub_title?: string;
   mutually_exclusive: boolean;
   category: string;
+  strike_date?: string | null;
   markets?: KalshiMarket[];
 }
 

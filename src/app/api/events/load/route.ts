@@ -61,8 +61,19 @@ export async function POST(request: Request) {
     const speaker = manualSpeaker || inferSpeaker(event.title);
     const eventType = manualEventType || inferEventType(event.title);
 
-    // Find event date from the first market's close_time
-    const eventDate = kalshiMarkets[0]?.close_time ?? null;
+    // Parse the actual event date from the event sub_title (e.g. "Mar 3, 2026" or "On Feb 27, 2026")
+    // Fall back to strike_date, then earliest market close_time
+    let eventDate: string | null = null;
+    if (event.sub_title) {
+      const cleaned = event.sub_title.replace(/^On\s+/i, "");
+      const parsed = new Date(cleaned);
+      if (!isNaN(parsed.getTime())) {
+        eventDate = parsed.toISOString();
+      }
+    }
+    if (!eventDate) {
+      eventDate = event.strike_date ?? kalshiMarkets[0]?.close_time ?? null;
+    }
 
     const supabase = getServerSupabase();
 
