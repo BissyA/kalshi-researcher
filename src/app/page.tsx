@@ -44,11 +44,34 @@ export default function HomePage() {
   const [speakers, setSpeakers] = useState<Array<{ id: string; name: string }>>([]);
   const [selectedSpeakerId, setSelectedSpeakerId] = useState("");
   const [modelPreset, setModelPreset] = useState("sonnet");
+  const [categories, setCategories] = useState<string[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState("");
 
   useEffect(() => {
     fetchPreviousEvents();
     fetchSpeakers();
   }, []);
+
+  useEffect(() => {
+    if (selectedSpeakerId) {
+      fetchCategories(selectedSpeakerId);
+    } else {
+      setCategories([]);
+      setSelectedCategory("");
+    }
+  }, [selectedSpeakerId]);
+
+  async function fetchCategories(speakerId: string) {
+    try {
+      const res = await fetch(`/api/corpus/categories?speakerId=${speakerId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setCategories(data.categories ?? []);
+      }
+    } catch {
+      setCategories([]);
+    }
+  }
 
   async function fetchSpeakers() {
     try {
@@ -114,7 +137,9 @@ export default function HomePage() {
         body: JSON.stringify({ eventId: event.id, speakerId: selectedSpeakerId }),
       }).catch(() => {});
     }
-    router.push(`/research/${event.id}?modelPreset=${modelPreset}`);
+    const params = new URLSearchParams({ modelPreset });
+    if (selectedCategory) params.set("corpusCategory", selectedCategory);
+    router.push(`/research/${event.id}?${params.toString()}`);
   }
 
   return (
@@ -181,6 +206,26 @@ export default function HomePage() {
                 ))}
               </select>
             </div>
+
+            {selectedSpeakerId && categories.length > 0 && (
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">
+                  Corpus Category
+                </label>
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="w-full max-w-xs px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
+                >
+                  <option value="">All categories</option>
+                  {categories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div>
               <label className="block text-sm text-zinc-400 mb-1">

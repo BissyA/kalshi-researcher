@@ -25,6 +25,10 @@ export default function CorpusPage() {
   const [mentionLoading, setMentionLoading] = useState(true);
   const [totalSettledEvents, setTotalSettledEvents] = useState(0);
 
+  // Category filter state
+  const [categories, setCategories] = useState<{ name: string; count: number }[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState("");
+
   // Series state (for Kalshi Markets tab)
   const [series, setSeries] = useState<SeriesWithStats[]>([]);
   const [seriesLoading, setSeriesLoading] = useState(false);
@@ -47,12 +51,37 @@ export default function CorpusPage() {
     fetchSpeakers();
   }, [fetchSpeakers]);
 
-  // Fetch mention history when speaker changes
+  // Fetch categories when speaker changes
+  const fetchCategories = useCallback(async () => {
+    if (!selectedSpeakerId) {
+      setCategories([]);
+      setSelectedCategory("");
+      return;
+    }
+    try {
+      const res = await fetch(`/api/corpus/categories?speakerId=${selectedSpeakerId}`);
+      const data = await res.json();
+      // Support both old format (string[]) and new format ({ name, count }[])
+      const cats = (data.categories ?? []).map((c: string | { name: string; count: number }) =>
+        typeof c === "string" ? { name: c, count: 0 } : c
+      );
+      setCategories(cats);
+    } catch {
+      setCategories([]);
+    }
+  }, [selectedSpeakerId]);
+
+  useEffect(() => {
+    fetchCategories();
+  }, [fetchCategories]);
+
+  // Fetch mention history when speaker or category changes
   const fetchMentionHistory = useCallback(async () => {
     setMentionLoading(true);
     try {
       const params = new URLSearchParams();
       if (selectedSpeakerId) params.set("speakerId", selectedSpeakerId);
+      if (selectedCategory) params.set("category", selectedCategory);
       const res = await fetch(`/api/corpus/mention-history?${params}`);
       const data = await res.json();
       setMentionData(data.rows ?? []);
@@ -62,7 +91,7 @@ export default function CorpusPage() {
     } finally {
       setMentionLoading(false);
     }
-  }, [selectedSpeakerId]);
+  }, [selectedSpeakerId, selectedCategory]);
 
   useEffect(() => {
     fetchMentionHistory();
@@ -194,6 +223,28 @@ export default function CorpusPage() {
       {/* Mention History Tab */}
       {activeTab === "mentions" && (
         <div className="space-y-4">
+          {selectedSpeakerId && (
+            <div className="flex items-center gap-3">
+              <label className="text-sm text-zinc-400">Category:</label>
+              <select
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className="px-3 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-white text-sm focus:outline-none focus:border-zinc-500"
+              >
+                <option value="">All Events</option>
+                {categories.map((cat) => (
+                  <option key={cat.name} value={cat.name}>
+                    {cat.name} ({cat.count})
+                  </option>
+                ))}
+              </select>
+              {selectedCategory && (
+                <span className="text-xs text-indigo-400 bg-indigo-900/30 px-2 py-1 rounded">
+                  Filtered: {selectedCategory}
+                </span>
+              )}
+            </div>
+          )}
           <MentionSummaryStats
             totalWords={mentionData.length}
             totalSettledEvents={totalSettledEvents}
@@ -211,6 +262,8 @@ export default function CorpusPage() {
           speakerName={selectedSpeaker?.name ?? ""}
           series={series}
           loading={seriesLoading}
+          categories={categories}
+          onCategoriesChanged={() => { fetchCategories(); fetchMentionHistory(); }}
           onAddSeries={handleAddSeries}
           onDeleteSeries={handleDeleteSeries}
           onImportSeries={handleImportSeries}

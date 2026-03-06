@@ -18,7 +18,7 @@ export async function GET(request: Request) {
   // Fetch events for this series, ordered by most recent first
   const { data: events, error: eventsError } = await supabase
     .from("events")
-    .select("id, title, kalshi_event_ticker, event_date, status")
+    .select("id, title, kalshi_event_ticker, event_date, status, category")
     .eq("series_id", seriesId)
     .order("event_date", { ascending: false, nullsFirst: false });
 
@@ -86,6 +86,7 @@ export async function GET(request: Request) {
       eventTicker: e.kalshi_event_ticker,
       eventDate: e.event_date,
       status: e.status,
+      category: e.category ?? null,
       words,
     };
   });

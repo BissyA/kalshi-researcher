@@ -13,6 +13,12 @@ interface WordTableProps {
   speakers: Array<{ id: string; name: string }>;
   selectedSpeakerId: string;
   onSpeakerChange: (speakerId: string) => void;
+  categories?: string[];
+  selectedCategories?: string[];
+  onCategoriesChange?: (categories: string[]) => void;
+  allWords?: Array<{ id: string; word: string; kalshi_market_ticker: string }>;
+  onRefreshMarkets?: () => Promise<void>;
+  refreshing?: boolean;
 }
 
 type SortKey = "word" | "price" | "rate" | "edge";
@@ -43,10 +49,17 @@ export function WordTable({
   speakers,
   selectedSpeakerId,
   onSpeakerChange,
+  categories = [],
+  selectedCategories = [],
+  onCategoriesChange,
+  allWords = [],
+  onRefreshMarkets,
+  refreshing = false,
 }: WordTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("edge");
   const [sortAsc, setSortAsc] = useState(false);
   const [expandedWord, setExpandedWord] = useState<string | null>(null);
+  const [catDropdownOpen, setCatDropdownOpen] = useState(false);
 
   // Build mention rate lookup from corpus data
   const mentionRateMap = useMemo(() => {
@@ -62,9 +75,14 @@ export function WordTable({
     return map;
   }, [mentionData]);
 
-  // Build rows merging wordScores + live prices + corpus mention data
+  // Build rows merging wordScores + live prices + corpus mention data + unscored words
   const rows = useMemo(() => {
-    return wordScores.map((ws): WordRow => {
+    const scoredTickers = new Set(
+      wordScores.map((ws) => ws.words?.kalshi_market_ticker).filter(Boolean)
+    );
+
+    // Rows from word scores (research results)
+    const scoredRows = wordScores.map((ws): WordRow => {
       const ticker = ws.words?.kalshi_market_ticker ?? "";
       const live = livePrices[ticker];
       const currentPrice = live ? live.yesAsk : ws.market_yes_price;
@@ -85,7 +103,33 @@ export function WordTable({
         events: mention?.events ?? [],
       };
     });
-  }, [wordScores, livePrices, mentionRateMap]);
+
+    // Rows from words in DB that don't have research scores (newly added markets)
+    const unscoredRows = allWords
+      .filter((w) => !scoredTickers.has(w.kalshi_market_ticker))
+      .map((w): WordRow => {
+        const live = livePrices[w.kalshi_market_ticker];
+        const currentPrice = live ? live.yesAsk : 0;
+        const mention = mentionRateMap.get(w.word.toLowerCase());
+        const historicalRate = mention?.rate ?? null;
+        const edge = historicalRate !== null && currentPrice > 0
+          ? historicalRate - currentPrice
+          : null;
+
+        return {
+          word: w.word,
+          marketTicker: w.kalshi_market_ticker,
+          currentPrice,
+          historicalRate,
+          edge,
+          sampleYes: mention?.yesCount ?? null,
+          sampleTotal: mention?.total ?? null,
+          events: mention?.events ?? [],
+        };
+      });
+
+    return [...scoredRows, ...unscoredRows];
+  }, [wordScores, livePrices, mentionRateMap, allWords]);
 
   // Sort
   function handleSort(key: SortKey) {
@@ -97,9 +141,16 @@ export function WordTable({
     }
   }
 
+  // When specific categories are selected, only show words that exist in that category's corpus
+  const filtered = useMemo(() => {
+    if (selectedCategories.length === 0) return rows;
+    const corpusWords = new Set(mentionData.map((m) => m.word.toLowerCase()));
+    return rows.filter((r) => corpusWords.has(r.word.toLowerCase()));
+  }, [rows, selectedCategories, mentionData]);
+
   const sorted = useMemo(() => {
     const dir = sortAsc ? 1 : -1;
-    return [...rows].sort((a, b) => {
+    return [...filtered].sort((a, b) => {
       switch (sortKey) {
         case "word":
           return dir * a.word.localeCompare(b.word);
@@ -113,14 +164,14 @@ export function WordTable({
           return 0;
       }
     });
-  }, [rows, sortKey, sortAsc]);
+  }, [filtered, sortKey, sortAsc]);
 
   function sortArrow(key: SortKey) {
     if (sortKey !== key) return "";
     return sortAsc ? " \u2191" : " \u2193";
   }
 
-  if (wordScores.length === 0) {
+  if (wordScores.length === 0 && allWords.length === 0) {
     return (
       <div className="border border-zinc-800 rounded-lg bg-zinc-900/30 p-8 text-center">
         <p className="text-zinc-400 text-sm">
@@ -133,7 +184,31 @@ export function WordTable({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">Word Analysis</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-white">Word Analysis ({sorted.length})</h2>
+          {onRefreshMarkets && (
+            <button
+              onClick={onRefreshMarkets}
+              disabled={refreshing}
+              className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-300 text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5"
+              title="Fetch latest markets from Kalshi"
+            >
+              {refreshing ? (
+                <>
+                  <span className="inline-block w-3 h-3 border border-zinc-500 border-t-white rounded-full animate-spin" />
+                  Refreshing...
+                </>
+              ) : (
+                <>
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Refresh Markets
+                </>
+              )}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-zinc-500">Speaker</label>
           <select
@@ -148,6 +223,67 @@ export function WordTable({
               </option>
             ))}
           </select>
+          {selectedSpeakerId && categories.length > 0 && onCategoriesChange && (
+            <div className="relative ml-3">
+              <button
+                onClick={() => setCatDropdownOpen(!catDropdownOpen)}
+                className="px-3 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:border-zinc-500 flex items-center gap-2"
+              >
+                {selectedCategories.length === 0
+                  ? "This event"
+                  : selectedCategories.length === 1
+                  ? selectedCategories[0]
+                  : `${selectedCategories.length} selected`}
+                <svg className="w-3 h-3 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {catDropdownOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setCatDropdownOpen(false)} />
+                  <div className="absolute right-0 top-full mt-1 z-20 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[180px]">
+                    {categories.map((cat) => {
+                      const isChecked = selectedCategories.includes(cat);
+                      return (
+                        <label
+                          key={cat}
+                          className="flex items-center gap-2.5 px-3 py-2 hover:bg-zinc-800 cursor-pointer text-sm text-zinc-200"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              if (isChecked) {
+                                onCategoriesChange(selectedCategories.filter((c) => c !== cat));
+                              } else {
+                                onCategoriesChange([...selectedCategories, cat]);
+                              }
+                            }}
+                            className="rounded border-zinc-600 bg-zinc-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0"
+                          />
+                          {cat}
+                        </label>
+                      );
+                    })}
+                    {selectedCategories.length > 0 && (
+                      <>
+                        <div className="border-t border-zinc-700 my-1" />
+                        <button
+                          onClick={() => {
+                            onCategoriesChange([]);
+                            setCatDropdownOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                        >
+                          Reset to this event
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {mentionLoading && (
             <span className="text-xs text-zinc-500">Loading...</span>
           )}

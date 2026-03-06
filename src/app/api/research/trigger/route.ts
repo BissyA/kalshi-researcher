@@ -8,7 +8,9 @@ export const maxDuration = 300; // 5 minutes for Vercel
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { eventId, layer = "baseline", speakerId, modelPreset = "sonnet" } = body;
+    const { eventId, layer = "baseline", speakerId, modelPreset = "sonnet", corpusCategory, corpusCategories } = body;
+    // Support both old single category and new multi-category format
+    const effectiveCategories: string[] = corpusCategories ?? (corpusCategory ? [corpusCategory] : []);
     const validPresets: ModelPreset[] = ["opus", "hybrid", "sonnet", "haiku"];
     const effectivePreset: ModelPreset = validPresets.includes(modelPreset) ? modelPreset : "sonnet";
 
@@ -72,7 +74,7 @@ export async function POST(request: Request) {
           const allResults: Array<{
             was_mentioned: boolean;
             words: { word: string };
-            events: { series_id: string | null };
+            events: { series_id: string | null; category: string | null };
           }> = [];
 
           while (true) {
@@ -81,7 +83,7 @@ export async function POST(request: Request) {
               .select(`
                 was_mentioned,
                 words!inner ( word ),
-                events!inner ( series_id )
+                events!inner ( series_id, category )
               `)
               .range(offset, offset + PAGE_SIZE - 1);
 
@@ -95,6 +97,8 @@ export async function POST(request: Request) {
           const wordMap = new Map<string, { yesCount: number; totalCount: number }>();
           for (const row of allResults) {
             if (!row.events.series_id || !seriesIds.includes(row.events.series_id)) continue;
+            // Filter by corpus categories if specified
+            if (effectiveCategories.length > 0 && (!row.events.category || !effectiveCategories.includes(row.events.category))) continue;
             const normalizedWord = row.words.word.toLowerCase();
             if (!wordMap.has(normalizedWord)) {
               wordMap.set(normalizedWord, { yesCount: 0, totalCount: 0 });
@@ -151,6 +155,7 @@ export async function POST(request: Request) {
         layer,
         status: "running",
         model_used: effectivePreset,
+        corpus_category: effectiveCategories.length > 0 ? effectiveCategories.join(",") : null,
       })
       .select()
       .single();

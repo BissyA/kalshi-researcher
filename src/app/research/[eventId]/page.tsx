@@ -43,6 +43,7 @@ export default function ResearchDashboard({
   const { eventId } = use(params);
   const searchParams = useSearchParams();
   const modelPreset = searchParams.get("modelPreset") || "sonnet";
+  const initialCorpusCategory = searchParams.get("corpusCategory") || "";
 
   // ── Core state ──
   const [event, setEvent] = useState<Event | null>(null);
@@ -57,6 +58,10 @@ export default function ResearchDashboard({
   const [selectedSpeakerId, setSelectedSpeakerId] = useState<string>("");
   const [mentionData, setMentionData] = useState<MentionHistoryRow[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
+  const [corpusCategories, setCorpusCategories] = useState<string[]>(
+    initialCorpusCategory ? [initialCorpusCategory] : []
+  );
+  const [categories, setCategories] = useState<string[]>([]);
 
   // ── UI state ──
   const [activeTab, setActiveTab] = useState<TabId>("research");
@@ -87,11 +92,15 @@ export default function ResearchDashboard({
     settled: boolean;
   } | null>(null);
 
+  // ── Market refresh state ──
+  const [refreshingMarkets, setRefreshingMarkets] = useState(false);
+
   // ── Live prices ──
-  const marketTickers = useMemo(
-    () => wordScores.map((s) => s.words?.kalshi_market_ticker).filter(Boolean),
-    [wordScores]
-  );
+  const marketTickers = useMemo(() => {
+    const fromScores = wordScores.map((s) => s.words?.kalshi_market_ticker).filter(Boolean);
+    const fromWords = words.map((w) => w.kalshi_market_ticker).filter(Boolean);
+    return [...new Set([...fromScores, ...fromWords])];
+  }, [wordScores, words]);
   const { prices: livePrices, status: wsStatus, lastUpdate: lastPriceUpdate } = useLivePrices(marketTickers);
 
   // ── Derived values ──
@@ -165,6 +174,27 @@ export default function ResearchDashboard({
     fetchSpeakers();
   }, []);
 
+  // Fetch categories when speaker changes
+  useEffect(() => {
+    if (!selectedSpeakerId) {
+      setCategories([]);
+      return;
+    }
+    async function fetchCats() {
+      try {
+        const res = await fetch(`/api/corpus/categories?speakerId=${selectedSpeakerId}`);
+        const data = await res.json();
+        const cats = (data.categories ?? []).map((c: string | { name: string }) =>
+          typeof c === "string" ? c : c.name
+        );
+        setCategories(cats);
+      } catch {
+        setCategories([]);
+      }
+    }
+    fetchCats();
+  }, [selectedSpeakerId]);
+
   const fetchMentionHistory = useCallback(async () => {
     if (!selectedSpeakerId) {
       setMentionData([]);
@@ -173,6 +203,7 @@ export default function ResearchDashboard({
     setMentionLoading(true);
     try {
       const params = new URLSearchParams({ speakerId: selectedSpeakerId });
+      if (corpusCategories.length > 0) params.set("category", corpusCategories.join(","));
       const res = await fetch(`/api/corpus/mention-history?${params}`);
       const data = await res.json();
       setMentionData(data.rows ?? []);
@@ -181,7 +212,7 @@ export default function ResearchDashboard({
     } finally {
       setMentionLoading(false);
     }
-  }, [selectedSpeakerId]);
+  }, [selectedSpeakerId, corpusCategories]);
 
   useEffect(() => {
     fetchMentionHistory();
@@ -196,7 +227,7 @@ export default function ResearchDashboard({
       const res = await fetch("/api/research/trigger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId, layer, speakerId: selectedSpeakerId || undefined, modelPreset }),
+        body: JSON.stringify({ eventId, layer, speakerId: selectedSpeakerId || undefined, modelPreset, corpusCategories: corpusCategories.length > 0 ? corpusCategories : undefined }),
       });
 
       if (!res.ok || !res.body) {
@@ -433,6 +464,30 @@ export default function ResearchDashboard({
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ eventId, speakerId: speakerId || null }),
               }).catch(() => {});
+            }}
+            categories={categories}
+            selectedCategories={corpusCategories}
+            onCategoriesChange={setCorpusCategories}
+            allWords={words}
+            refreshing={refreshingMarkets}
+            onRefreshMarkets={async () => {
+              setRefreshingMarkets(true);
+              try {
+                const res = await fetch("/api/events/refresh-markets", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ eventId }),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error);
+                if (data.newWords > 0) {
+                  setWords(data.words ?? []);
+                }
+              } catch {
+                // silently fail
+              } finally {
+                setRefreshingMarkets(false);
+              }
             }}
           />
 

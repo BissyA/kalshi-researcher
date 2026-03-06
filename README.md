@@ -28,6 +28,7 @@ AI-powered research tool for Kalshi "mention markets" — prediction contracts o
 - [Deployment (Fly.io)](#deployment-flyio)
 - [Two-Layer Research Model](#two-layer-research-model)
 - [Relationship to Speed Trader](#relationship-to-speed-trader)
+- [Corpus Categories](#corpus-categories)
 - [Current Status & Known Issues](#current-status--known-issues)
 - [Debugging Notes](#debugging-notes)
 - [Cost Estimates](#cost-estimates)
@@ -54,6 +55,8 @@ This tool:
 11. **Tracks word mention rates** across all historical Kalshi events per speaker via the Corpus page
 12. **Manages Kalshi market series** — search and add series from the Kalshi API, import historical settled events, refresh data per-series
 13. **Quick Analysis** — paste a Kalshi mention market URL to instantly compare live market prices against historical mention rates, with WebSocket live price updates, saved search persistence, and edge detection
+14. **Corpus categories** — organize events by type (Rally, Press Conference, Sports, etc.) to filter mention rates by event category. Categories are managed per-speaker with full CRUD. Research runs can be scoped to one or more categories so the synthesizer only sees relevant historical data.
+15. **Refresh Markets** — pull in newly added Kalshi strikes for an event without re-running research. Unscored words appear in the Word Analysis table with corpus data if available.
 
 The research happens in two layers:
 - **Baseline layer** (comprehensive): historical frequency, event format analysis, agenda research, news cycle analysis, market structure, corpus settlement data (when speaker is selected)
@@ -126,11 +129,12 @@ kalshi-research/
 │       ├── 003_dashboard_redesign.sql # briefing column, word_frequencies, cancelled status
 │       ├── 004_speakers_and_series.sql # speakers + series tables, events.series_id FK
 │       ├── 005_event_speaker_id.sql   # events.speaker_id FK to speakers table
-│       └── 006_excluded_tickers.sql   # excluded_tickers TEXT[] on series table
+│       ├── 006_excluded_tickers.sql   # excluded_tickers TEXT[] on series table
+│       └── 007_corpus_categories.sql  # events.category TEXT, research_runs.corpus_category TEXT
 │
 └── src/
     ├── types/
-    │   ├── kalshi.ts             # KalshiEvent, KalshiMarket, WordContract
+    │   ├── kalshi.ts             # KalshiEvent (with sub_title, strike_date), KalshiMarket, WordContract
     │   ├── research.ts           # All agent I/O types, OrchestratorInput/Output, CorpusMentionRate
     │   ├── database.ts           # TypeScript interfaces for all DB table rows (including DbSpeaker, DbSeries)
     │   ├── components.ts         # Shared component-level types (Event, WordScore, Cluster, Trade, etc.)
@@ -164,7 +168,7 @@ kalshi-research/
     │   │   ├── MentionSummaryStats.tsx   # Stat cards: words tracked, settled events, avg rate, top word
     │   │   ├── MentionHistoryTable.tsx   # Sortable, searchable table with expandable per-event detail rows + reset sort
     │   │   ├── TranscriptSearchBar.tsx   # Debounced text search input (used by Quick Analysis)
-    │   │   ├── KalshiMarketsTab.tsx      # Series management: add/delete/import/refresh + expandable events + word results
+    │   │   ├── KalshiMarketsTab.tsx      # Series management + category management panel + expandable events with category dropdowns
     │   │   ├── KalshiSeriesSearch.tsx    # Searchable dropdown querying Kalshi API for available series
     │   │   └── QuickAnalysisTab.tsx      # Paste URL → live price vs historical rate comparison with saved searches
     │   │
@@ -208,7 +212,8 @@ kalshi-research/
             ├── events/
             │   ├── load/route.ts         # POST: load event from Kalshi
             │   ├── list/route.ts         # GET: list all events
-            │   └── speaker/route.ts      # PATCH: persist speaker selection on an event
+            │   ├── speaker/route.ts      # PATCH: persist speaker selection on an event
+            │   └── refresh-markets/route.ts # POST: re-fetch markets from Kalshi, upsert new words
             │
             ├── research/
             │   ├── trigger/route.ts      # POST: start research (SSE stream, accepts speakerId, fetches corpus data)
@@ -240,7 +245,8 @@ kalshi-research/
             │   ├── series/
             │   │   ├── route.ts              # GET/POST/DELETE: manage series for a speaker
             │   │   └── events/route.ts       # GET: list events + word results for a series. DELETE: remove single event + track in excluded_tickers
-            │   ├── mention-history/route.ts  # GET: aggregated word mention rates across events
+            │   ├── categories/route.ts          # GET/PATCH/PUT/DELETE: category CRUD (list, assign, rename globally, delete globally)
+            │   ├── mention-history/route.ts  # GET: aggregated word mention rates across events (supports ?category= filter)
             │   ├── import-historical/route.ts # POST: import settled events from Kalshi API
             │   ├── kalshi-series/route.ts    # GET: search Kalshi API for available series (cached)
             │   └── quick-prices/route.ts     # GET: fetch live market prices for an event (read-only, no DB writes)
@@ -283,7 +289,7 @@ The `KALSHI_PRIVATE_KEY` env var takes precedence over `KALSHI_PRIVATE_KEY_PATH`
 
 **Supabase project**: `hczppfsuqtpccxvmyaue`
 
-All 6 migrations (001-006) have been applied to the live Supabase database.
+All 7 migrations (001-007) have been applied to the live Supabase database.
 
 10 tables + 2 views:
 
@@ -318,11 +324,12 @@ Primary table for mention market events.
 | title | text | |
 | speaker | text | Denormalized from speakers table. Set during import |
 | event_type | text | address_to_congress, press_conference, etc. |
-| event_date | timestamptz | |
+| event_date | timestamptz | Actual event date. Parsed from Kalshi event `sub_title` (e.g. "Mar 3, 2026"), falling back to `strike_date` then market `close_time`. See "Event Date Resolution" below. |
 | venue | text | Nullable |
 | estimated_duration_minutes | integer | Set after event_format agent runs |
 | series_id | uuid (FK → series) | **Migration 004**. ON DELETE SET NULL |
 | speaker_id | uuid (FK → speakers) | **Migration 005**. ON DELETE SET NULL. Explicit speaker linkage for analytics — set from research page speaker dropdown. Used by analytics API to pull corpus historical mention rates. |
+| category | text | **Migration 007**. Nullable. Topical category for corpus filtering (e.g. "Rally", "Press Conference", "Sports"). Managed via `/api/corpus/categories`. Indexed. |
 | status | text | `pending` → `researched` → `live` → `completed` |
 | created_at, updated_at | timestamptz | |
 
@@ -347,6 +354,7 @@ Each research execution against an event.
 | status | text | 'running', 'completed', 'failed', or 'cancelled' |
 | error_message | text | Set when status is 'failed' |
 | model_used | text | Model preset used for this run: `'opus'`, `'hybrid'`, `'sonnet'`, or `'haiku'`. Set on insert by the trigger API. Displayed as a purple badge in RunHistory. |
+| corpus_category | text | **Migration 007**. Nullable. Which corpus category was used to filter mention rates for this research run. `null` means all categories were included. |
 | briefing | text | **Migration 003** — Markdown research briefing from synthesizer |
 | historical_result | jsonb | Phase 1 agent output |
 | agenda_result | jsonb | Phase 1 agent output |
@@ -453,6 +461,8 @@ Ground truth outcomes after events conclude.
 | 003_dashboard_redesign.sql | Applied | briefing column, word_frequencies, cancelled status |
 | 004_speakers_and_series.sql | Applied | speakers + series tables, events.series_id FK, indexes |
 | 005_event_speaker_id.sql | Applied | events.speaker_id FK to speakers, index |
+| 006_excluded_tickers.sql | Applied | excluded_tickers TEXT[] on series table |
+| 007_corpus_categories.sql | Applied | events.category TEXT + index, research_runs.corpus_category TEXT |
 
 ---
 
@@ -466,6 +476,7 @@ The Corpus page (`/corpus`) provides cross-event analytics and historical data m
 speakers (manually created)
   ├── series (Kalshi series tickers, linked to speaker via series.speaker_id)
   │    └── events (individual Kalshi events, linked to series via events.series_id)
+  │         ├── category (optional topical tag: "Rally", "Press Conference", etc.)
   │         └── words (word contracts per event)
   │              └── event_results (was_mentioned: yes/no per word per event)
   │
@@ -484,8 +495,10 @@ speakers (manually created)
 1. **Create a speaker** — via the dropdown at the top of `/corpus` ("+ Add New Speaker")
 2. **Add Kalshi series** — in the Kalshi Markets tab, search the Kalshi API for series and click to add
 3. **Import historical data** — click "Refresh" on a series to pull all settled events from Kalshi
-4. **View mention rates** — switch to Mention History tab to see cross-event word frequencies
-5. **Browse events** — expand a series to see every individual event, expand an event to see word results (green Y / red N)
+4. **Create categories** — in the Kalshi Markets tab, use the "Corpus Categories" panel to create topical categories (e.g. "Rally", "Press Conference", "Sports")
+5. **Assign events to categories** — expand a series, use the dropdown on each event row to assign it to a category
+6. **View mention rates** — switch to Mention History tab to see cross-event word frequencies. Use the category filter to see rates for specific event types only.
+7. **Browse events** — expand a series to see every individual event, expand an event to see word results (green Y / red N)
 
 ### Import Flow (POST /api/corpus/import-historical)
 
@@ -497,12 +510,14 @@ speakers (manually created)
 6. Deduplicates words within the same event (handles `UNIQUE(event_id, word)` constraint — some Kalshi events have multiple market tickers resolving to the same display word)
 7. Updates `series.events_count`, `series.words_count`, and `series.last_imported_at`
 8. Uses `inferEventType()` from url-parser.ts for event type, but NOT `inferSpeaker()` — speaker always comes from the series record
+9. **Event date resolution**: Parses the actual event date from the Kalshi event's `sub_title` field (e.g. "Mar 3, 2026" or "On Feb 27, 2026"), stripping any leading "On " prefix. Falls back to `strike_date` (nullable, only set for date-strike events), then to the first market's `close_time`. This was fixed because `close_time` represents when trading closes (often in the future when loaded pre-event), not when the event actually occurs.
 
 ### Mention History Aggregation (GET /api/corpus/mention-history)
 
 - Fetches all `event_results` joined with `words` and `events`
 - **Paginates** to avoid Supabase's default 1000-row limit (fetches in 1000-row pages)
 - Filters by `speakerId` through the series linkage: looks up which series belong to the speaker, then filters events by `series_id`
+- **Optional `?category=` filter**: When provided, only includes events where `events.category` matches exactly. Events with `category = null` or a different category are excluded from the aggregation. This allows scoping mention rates to specific event types (e.g. only Rally events).
 - Groups results by normalized word (case-insensitive)
 - Returns: `{ rows: MentionHistoryRow[], totalSettledEvents: number }`
 - Each row has: `word`, `yesCount`, `noCount`, `totalEvents`, `mentionRate`, and expandable `events[]` with per-event detail
@@ -512,7 +527,7 @@ speakers (manually created)
 - Fetches all events for a series ordered by most recent first
 - Joins `event_results` with `words` to nest word results per event
 - Paginates to handle large result sets (same 1000-row Supabase limit)
-- Returns: `{ events: [{ id, title, eventDate, status, words: [{ word, wasMentioned }] }] }`
+- Returns: `{ events: [{ id, title, eventDate, status, category, words: [{ word, wasMentioned }] }] }`
 
 ### Kalshi Series Search (GET /api/corpus/kalshi-series)
 
@@ -535,7 +550,7 @@ Lightweight read-only endpoint for the Quick Analysis tab. Does NOT write to the
 ### Current Data
 
 As of the last import:
-- **1 speaker**: Donald Trump
+- **2 speakers**: Donald Trump, Karoline Leavitt
 - **3 series**: KXTRUMPMENTION (114 events), KXTRUMPMENTIONB (57 events), KXBUSINESSROUNDTABLE (1 event)
 - **172 events with word results** (across all series — some events share titles but are different real-world events on different dates)
 - **No true duplicate events** — each event has a unique `kalshi_event_ticker`. Events with identical titles (e.g., "What will Trump say during his announcement?" appearing multiple times) are different events on different dates.
@@ -783,11 +798,11 @@ All DB writes are individually wrapped in try/catch — a failed write doesn't c
 
 When a speaker is selected (via `speakerId` in the trigger request or from `event.speaker_id`):
 
-1. **Trigger API** fetches corpus data: `speakers` → `series` (by `speaker_id`) → `event_results` (paginated, joined with `words` and `events`) → filter by series → build `corpusMentionRates` map (word → { mentionRate, yesCount, totalEvents })
+1. **Trigger API** fetches corpus data: `speakers` → `series` (by `speaker_id`) → `event_results` (paginated, joined with `words` and `events`) → filter by series → optionally filter by `corpusCategory` (if provided) → build `corpusMentionRates` map (word → { mentionRate, yesCount, totalEvents }). The `corpusCategory` is stored on `research_runs.corpus_category` for tracking.
 2. **Orchestrator** passes `corpusMentionRates` through to the synthesizer (single field pass-through, no transformation)
 3. **Synthesizer** receives corpus data as an additional research section, reallocates weight from base_rate to corpus (70/30 split), and instructs Claude to use corpus rates as the primary anchor for base rate probability
 
-If no speaker is selected or the speaker has no series/settlement data, `corpusMentionRates` is `undefined` and the synthesizer falls back to its standard weighting (no corpus weight).
+If no speaker is selected or the speaker has no series/settlement data, `corpusMentionRates` is `undefined` and the synthesizer falls back to its standard weighting (no corpus weight). When `corpusCategory` is provided, only events with that exact category string contribute to the mention rates — events with `null` or different categories are excluded.
 
 ---
 
@@ -797,10 +812,10 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/events/load` | POST | Load event from Kalshi by URL or ticker |
+| `/api/events/load` | POST | Load event from Kalshi by URL or ticker. Parses event date from `sub_title` field (actual event date), falling back to `strike_date` then market `close_time`. |
 | `/api/events/list` | GET | List events with research runs (excludes corpus-only imports) |
 | `/api/events/speaker` | PATCH | Persist speaker selection on an event `{ eventId, speakerId }` |
-| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream). Accepts `{ eventId, layer, speakerId?, modelPreset? }`. `modelPreset` can be `"opus"`, `"hybrid"`, `"sonnet"` (default), or `"haiku"` — controls which Claude model each agent uses. Saved to `research_runs.model_used`. When `speakerId` is provided: persists to event, fetches corpus mention rates from settled Kalshi markets, passes to synthesizer. |
+| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream). Accepts `{ eventId, layer, speakerId?, modelPreset?, corpusCategory? }`. `modelPreset` can be `"opus"`, `"hybrid"`, `"sonnet"` (default), or `"haiku"` — controls which Claude model each agent uses. Saved to `research_runs.model_used`. When `speakerId` is provided: persists to event, fetches corpus mention rates from settled Kalshi markets, passes to synthesizer. When `corpusCategory` is provided: filters corpus events by category before computing mention rates, and stores the category on `research_runs.corpus_category`. |
 | `/api/research/stop` | POST | Cancel a running research run |
 | `/api/research/[eventId]` | GET | Get full research data for an event |
 | `/api/research/status/[runId]` | GET | Check status of a specific run |
@@ -834,8 +849,12 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 | `/api/corpus/series` | GET | List series for a speaker `?speakerId=` |
 | `/api/corpus/series` | POST | Create series `{ speakerId, seriesTicker, displayName }` |
 | `/api/corpus/series` | DELETE | Delete series + cascade all data `?id=` |
-| `/api/corpus/series/events` | GET | List events + word results for a series `?seriesId=` |
-| `/api/corpus/mention-history` | GET | Aggregated word mention rates `?speakerId=` |
+| `/api/corpus/series/events` | GET | List events + word results for a series `?seriesId=` (includes `category` field) |
+| `/api/corpus/categories` | GET | List distinct categories for a speaker `?speakerId=` |
+| `/api/corpus/categories` | PATCH | Assign category to events `{ eventIds: string[], category: string \| null }` |
+| `/api/corpus/categories` | PUT | Rename category globally `{ speakerId, oldName, newName }` — updates all events with old name |
+| `/api/corpus/categories` | DELETE | Delete category globally `?speakerId=...&name=...` — clears category from all matching events |
+| `/api/corpus/mention-history` | GET | Aggregated word mention rates `?speakerId=` (optional `?category=` filter) |
 | `/api/corpus/import-historical` | POST | Import settled events from Kalshi `{ seriesId }` |
 | `/api/corpus/kalshi-series` | GET | Search Kalshi API for series `?q=` (cached 10min) |
 | `/api/corpus/quick-prices` | GET | Fetch live market prices for an event `?url=` (read-only, no DB writes) |
@@ -855,6 +874,7 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 - URL input field for Kalshi event URLs or raw tickers
 - "Load Event" button fetches event data from Kalshi
 - **Speaker dropdown** — fetches speakers from `/api/corpus/speakers` and shows a dropdown to select which speaker's corpus data to use. This is the ONLY speaker selection on the home page (no free-text speaker input, no event type dropdown — agents determine those automatically).
+- **Corpus Category dropdown** — appears when a speaker is selected and that speaker has categories defined. Allows scoping the research run to a specific event type (e.g. only "Rally" events). Passed as `?corpusCategory=xxx` URL param to the research page and included in the trigger request. When selected, only events with that category contribute to the synthesizer's empirical mention rates.
 - **Model preset dropdown** — allows selecting which Claude model configuration to use for research: "Opus (Full) — highest quality", "Hybrid — Opus synthesizer, Sonnet/Haiku agents", "Sonnet (All) — good balance" (default), "Haiku (All) — cheapest". Stored in `modelPreset` state, passed as a URL query param (`?modelPreset=xxx`) when navigating to the research page.
 - Displays event details: title, ticker, word count
 - Shows grid of all word contracts with current YES prices
@@ -908,6 +928,7 @@ Strategic analytics page for long-term speaker data, completely separate from in
 - All tabs filter by the selected speaker
 
 **Mention History tab:**
+- **Category filter dropdown** — appears when the speaker has categories defined. Filters all mention data to only include events with the selected category. Defaults to "All categories".
 - `MentionSummaryStats` — Stat cards: Words Tracked, Settled Events, Avg Mention Rate, Top Word
 - `MentionHistoryTable` — Sortable, searchable table with columns: Word, Yes, No, Total, Mention Rate %
   - **Search input** at the top filters words by name as you type (case-insensitive substring match)
@@ -916,11 +937,14 @@ Strategic analytics page for long-term speaker data, completely separate from in
   - Click any row to expand → shows per-event detail (event title, date, MENTIONED/NOT MENTIONED badge)
 
 **Kalshi Markets tab:**
-- `KalshiSeriesSearch` — Searchable dropdown querying the Kalshi API for all available series. Type a keyword (e.g., "mention", "trump", "vance") to filter. Click a result to add the series to the speaker.
+- **Side-by-side layout** (2-column grid on large screens):
+  - **Left: Add Kalshi Series** — `KalshiSeriesSearch` searchable dropdown querying the Kalshi API for all available series. Type a keyword (e.g., "mention", "trump", "vance") to filter. Click a result to add the series to the speaker.
+  - **Right: Corpus Categories** — Category management panel. Create new categories by name, rename globally (updates all events), delete globally (clears from all events). Categories listed with Rename/Delete buttons. See [Corpus Categories](#corpus-categories) for full details.
 - Series cards showing: ticker, display name, events count, words count, last imported date
 - Per-series **Refresh** button (re-imports from Kalshi API) and **Delete** button
 - **Expandable series → events**: Click a series to see all its events, most recent first
-  - Each event shows: title, date, status, and quick Y/N count
+  - Each event shows: title, date, status, quick Y/N count, and a **category dropdown**
+  - **Category dropdown** — simple `<select>` on each event row. Shows "No category" by default, lists all existing categories. Changing the dropdown immediately assigns/unassigns the event via `PATCH /api/corpus/categories`. Highlighted in indigo when assigned.
   - **Expandable event → words**: Click an event to see a word table with green **Y** / red **N** for each word
 
 **Quick Analysis tab:**
@@ -998,11 +1022,12 @@ TypeScript interfaces for all DB rows: `DbSpeaker`, `DbSeries`, `DbEvent`, `DbWo
 - Shows a "Run research to see event context" placeholder when all three props are null
 
 **`WordTable.tsx`** (new):
-- Props: `{ wordScores: WordScore[]; livePrices: Record<string, PriceData>; mentionData: MentionHistoryRow[]; mentionLoading: boolean; speakers: Array<{ id: string; name: string }>; selectedSpeakerId: string; onSpeakerChange: (speakerId: string) => void }`
+- Props: `{ wordScores: WordScore[]; livePrices: Record<string, PriceData>; mentionData: MentionHistoryRow[]; mentionLoading: boolean; speakers: Array<{ id: string; name: string }>; selectedSpeakerId: string; onSpeakerChange: (speakerId: string) => void; categories?: string[]; selectedCategory?: string; onCategoryChange?: (category: string) => void }`
 - Builds a `mentionRateMap` (word name → rate + events) from corpus `MentionHistoryRow[]`
 - Merges word scores (for the word list + market tickers), live prices (for current market price), and corpus data (for historical rate, edge, sample, and per-event detail)
 - Manages its own expand/collapse state for per-event detail rows
 - Shows "Select a speaker" prompt when no speaker is selected
+- **Category dropdown** next to the speaker dropdown — appears when a speaker is selected and has categories defined. Filters mention data to only include events with the selected category.
 - **Speaker selection persists**: `onSpeakerChange` callback saves the selection to the event record via `PATCH /api/events/speaker`, so it survives page reloads and is available to the analytics API
 
 **`EventHeader.tsx`** (updated):
@@ -1103,7 +1128,7 @@ npm run build
 
 **First-time setup:**
 1. Create a Supabase project
-2. Run all six migrations (001-006) in order
+2. Run all seven migrations (001-007) in order
 3. Get a Kalshi API key and RSA private key
 4. Get an Anthropic API key with access to Claude Opus 4.6, Sonnet 4.5, and/or Haiku 4.5
 5. Fill in `.env.local` with all credentials
@@ -1196,6 +1221,61 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 
 ---
 
+## Corpus Categories
+
+Categories allow grouping corpus events by type (e.g. "Rally", "Press Conference", "Sports/Entertainment") so that mention rates can be filtered to only relevant event types. This is critical because a speaker's word usage patterns differ dramatically between event types — a rally has very different word frequencies than a bilateral meeting.
+
+### Data Model
+
+Categories are stored as a free-text `category` column on the `events` table (Migration 007). There is no separate categories table — categories are derived from distinct `category` values across a speaker's events. This means a category only "exists" if at least one event has it assigned (or it has been created locally in the UI pending assignment).
+
+### Category Management (Corpus Page → Kalshi Markets Tab)
+
+The Kalshi Markets tab has a **side-by-side layout**: "Add Kalshi Series" on the left, "Corpus Categories" on the right.
+
+**Create**: Type a name and click "Create". The category is added to the local list immediately and becomes available in event dropdowns. It becomes persistent once at least one event is assigned to it.
+
+**Rename** (global): Click "Rename" next to a category, enter the new name, click "Save". This calls `PUT /api/corpus/categories` which finds ALL events belonging to the speaker's series that have the old category name and updates them to the new name. Returns the count of events updated.
+
+**Delete** (global): Click "Delete" next to a category, confirm the dialog. This calls `DELETE /api/corpus/categories?speakerId=...&name=...` which sets `category = null` on ALL events belonging to the speaker's series that have that category name. The events are not deleted — just uncategorized.
+
+**Assign**: Each event row in the expanded series list has a `<select>` dropdown. Changing it calls `PATCH /api/corpus/categories` with the event ID and selected category (or `null` for "No category"). The assignment is immediate — no save button needed.
+
+### Category API Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/corpus/categories?speakerId=...` | Returns `{ categories: string[] }` — distinct category values from all events in the speaker's series, sorted alphabetically |
+| PATCH | `/api/corpus/categories` | Assign category to events. Body: `{ eventIds: string[], category: string \| null }`. Used by the event row dropdown. |
+| PUT | `/api/corpus/categories` | Global rename. Body: `{ speakerId, oldName, newName }`. Finds all events in the speaker's series with `category = oldName`, updates to `newName.trim()`. Returns `{ ok: true, updated: number }`. |
+| DELETE | `/api/corpus/categories?speakerId=...&name=...` | Global delete. Finds all events in the speaker's series with `category = name`, sets `category = null`. Returns `{ ok: true, cleared: number }`. |
+
+### Category Filtering in Mention History
+
+The mention history API (`GET /api/corpus/mention-history`) accepts an optional `?category=` query parameter. When provided, the aggregation loop skips any event where `events.category !== category`. This means:
+- Events with `category = null` (uncategorized) are excluded when a category filter is active
+- Only events explicitly assigned to the selected category contribute to mention rates
+- The `totalSettledEvents` count also reflects only the filtered events
+
+The corpus page shows a category filter dropdown on the Mention History tab when the speaker has categories defined.
+
+### Category Filtering in Research Pipeline
+
+The research trigger API (`POST /api/research/trigger`) accepts an optional `corpusCategory` in the request body. When provided:
+1. The trigger API filters corpus `event_results` by checking `events.category === corpusCategory` before building the `corpusMentionRates` map
+2. The `corpusCategory` is stored on `research_runs.corpus_category` for tracking which category scope was used
+3. The synthesizer receives only mention rates from events matching that category
+
+The home page and research page both support category selection:
+- **Home page**: Category dropdown appears when a speaker is selected and has categories. Passed as `?corpusCategory=xxx` URL param.
+- **Research page**: Reads `corpusCategory` from URL params, fetches categories when speaker changes, passes to trigger API and mention-history API.
+
+### Import Behavior
+
+New events imported via "Refresh" come in with `category = null` (uncategorized). The user must manually assign them to categories via the event row dropdown. This is by design — category assignment requires human judgment about event type.
+
+---
+
 ## Current Status & Known Issues
 
 ### What's Built and Working
@@ -1218,8 +1298,9 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - Run cancellation
 - **Corpus page** with 3 tabs:
   - Mention History: cross-event word mention rates with searchable, sortable, expandable per-event detail (827+ data points across 116 events). Word search filter, reset sort button. Data from Kalshi settled markets (ground truth).
-  - Kalshi Markets: series management with searchable Kalshi API dropdown, per-series import/refresh, expandable events with word result tables. Per-event removal with excluded_tickers tracking (removed events won't be re-imported on refresh). Event title filter for quickly finding/removing non-relevant events. Event titles hyperlinked to original Kalshi market pages for speaker verification. Supports multi-speaker series (e.g. KXCONGRESSMENTION) — import full series under a speaker, remove non-relevant events, refresh safely.
+  - Kalshi Markets: series management with searchable Kalshi API dropdown, per-series import/refresh, expandable events with word result tables and category dropdowns. **Category management panel** — create/rename/delete categories alongside "Add Kalshi Series". Per-event removal with excluded_tickers tracking (removed events won't be re-imported on refresh). Event title filter for quickly finding/removing non-relevant events. Event titles hyperlinked to original Kalshi market pages for speaker verification. Supports multi-speaker series (e.g. KXCONGRESSMENTION) — import full series under a speaker, remove non-relevant events, refresh safely.
   - Quick Analysis: paste URL → live price vs historical rate comparison table with WebSocket updates, saved search list (localStorage), expandable per-event detail, edge detection, summary cards
+- **Corpus categories** — create, rename (globally), delete (globally) categories in the Kalshi Markets tab. Assign events to categories via dropdown. Filter mention history and research pipeline by category.
 - Speaker → Series → Events data model (no fragile inference)
 - Historical data import from Kalshi API with pagination and deduplication
 
@@ -1232,6 +1313,7 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - **Event types beyond speeches**: Only `address_to_congress` type events tested end-to-end with research.
 - **One empty event**: KXTRUMPMENTION has 1 event (a Press Conference) with 0 settled markets — this is a Kalshi data issue, not a bug.
 - **One missing result set**: KXTRUMPMENTIONB-25DEC03 has 20 words but 0 event_results (transient DB error during import). Re-import the series to fix.
+- **Event dates fixed (Phase 14)**: Event dates were previously set from market `close_time`, which is the market's scheduled trading close (a future date when loaded pre-event). Now correctly parsed from the Kalshi event's `sub_title` field (actual event date). Existing traded events were manually corrected in the database. Both `/api/events/load` and `/api/corpus/import-historical` use the new resolution logic.
 - **Analytics historical rates require speaker_id**: The analytics page only shows corpus historical mention rates for events where the user has set a speaker (via the home page dropdown before research, or the research page EventHeader/WordTable dropdown). Events without a `speaker_id` show "-" for Mention Rate and Edge columns. Setting the speaker on the home page before triggering research is now the recommended flow — it ensures both the synthesizer and analytics have corpus data.
 
 ### Architecture Improvements to Consider
@@ -1256,12 +1338,13 @@ Shared: `kalshi-client.ts`, WebSocket-to-SSE pattern, `kalshi-key.pem`, Kalshi A
 - Website uses `/markets/` URLs, API uses `/events/`. Load route handles this.
 - Market `result` field: `"yes"`, `"no"`, `"scalar"`, or `""` (empty = unsettled)
 - `yes_sub_title` gives the word display name for markets
+- Event `sub_title` contains the actual event date (e.g. "Mar 3, 2026" or "On Feb 27, 2026"). Used for `event_date` resolution. `strike_date` is often `null` for mention market events.
 - Historical markets endpoint: `GET /historical/markets?event_ticker=...` — use when nested markets are empty
 - Series listing: `GET /series` — returns all series (no search param, filter client-side)
 - Full OpenAPI spec at `docs/kalshi-openapi.yaml`
 
 ### Supabase
-- All 6 migrations applied. **Default 1000-row limit** — always paginate large queries.
+- All 7 migrations applied (001-007). **Default 1000-row limit** — always paginate large queries.
 - Service role key bypasses RLS. Anon key respects RLS.
 - Management API at `POST https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query` for running SQL directly.
 
@@ -1531,3 +1614,50 @@ Both layers: double the per-run cost. Failed runs still cost money. The default 
 99. **SSE keepalive for research trigger** — `src/app/api/research/trigger/route.ts` now sends `: keepalive\n\n` SSE comments every 15 seconds on the progress stream. Fixes "network error" during the synthesizer step — the synthesizer API call takes 60-120+ seconds (32K max tokens), during which no progress events were sent, causing Fly.io's proxy to kill the idle connection after ~60s. The keepalive is a standard SSE comment (colon-prefixed) that `EventSource` clients silently ignore. Interval is cleared on stream close.
 
 100. **Fly secrets configuration** — All 6 environment variables set as Fly secrets: `KALSHI_API_KEY`, `KALSHI_PRIVATE_KEY` (raw PEM content, not file path), `ANTHROPIC_API_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. Secrets are injected at runtime, not baked into the Docker image.
+
+### Phase 14: Event Date Fix (Mar 2026)
+
+101. **Event date resolution fix** — `event_date` was previously set from `kalshiMarkets[0]?.close_time`, which is the market's scheduled trading close time. When events are loaded before they occur (the normal use case), `close_time` is a future date — e.g., an event on Mar 3 would show Mar 17 because that's when the market closes for settlement. The fix parses the actual event date from the Kalshi event's `sub_title` field (e.g. "Mar 3, 2026" or "On Feb 27, 2026"), stripping any "On " prefix before parsing. Falls back to `strike_date` (from the Kalshi OpenAPI spec — "The specific date this event is based on"), then to market `close_time`. Fixed in two files:
+    - `src/app/api/events/load/route.ts` — new events loaded from the home page
+    - `src/app/api/corpus/import-historical/route.ts` — corpus event imports
+
+102. **KalshiEvent type updates** — Added `sub_title?: string` and `strike_date?: string | null` to both `KalshiEvent` interfaces:
+    - `src/types/kalshi.ts` (shared type)
+    - `src/app/api/corpus/import-historical/route.ts` (local type)
+
+103. **Existing event date corrections** — Manually updated 3 traded events in the database with correct dates via Supabase Management API:
+    - `KXTRUMPMENTIONB-26MAR17`: `2026-03-17` → `2026-03-03` (Trump Bilateral Meeting with Germany)
+    - `KXSECPRESSMENTION-26MAR15`: `2026-03-15` → `2026-03-04` (Karoline Leavitt press briefing)
+    - `KXTRUMPMENTIONB-26FEB28`: `2026-02-28` → `2026-02-27` (Trump remarks in Corpus Christi)
+
+    **Note**: All other corpus-imported events may also have incorrect dates (set from `close_time` during their original import). Re-importing each series via "Refresh" on the corpus page will fix them, as the import now uses the corrected date resolution logic.
+
+### Phase 15: Corpus Categories (Mar 2026)
+
+104. **Migration 007: corpus categories** — New `category TEXT` column on `events` table with index (`idx_events_category`). New `corpus_category TEXT` column on `research_runs` table. Applied to live Supabase database via Management API. Categories are free-text strings (no separate table) — a category exists as long as at least one event has it assigned.
+
+105. **Categories API** — New `src/app/api/corpus/categories/route.ts` with four HTTP methods:
+    - `GET ?speakerId=` — returns distinct `category` values from all events in the speaker's series (via series linkage), sorted alphabetically
+    - `PATCH { eventIds, category }` — assigns a category (or `null`) to one or more events. Used by the event row dropdown for immediate assignment.
+    - `PUT { speakerId, oldName, newName }` — global rename. Finds all events in the speaker's series with `category = oldName`, updates to `newName.trim()`. Returns update count.
+    - `DELETE ?speakerId=&name=` — global delete. Finds all events in the speaker's series with `category = name`, sets `category = null`. Returns cleared count.
+
+106. **Category management panel** — `src/components/corpus/KalshiMarketsTab.tsx` rewritten with a side-by-side layout: "Add Kalshi Series" on the left, "Corpus Categories" panel on the right. The categories panel provides full CRUD:
+    - **Create**: text input + "Create" button. Category appears in the local list immediately and in event dropdowns.
+    - **Rename**: click "Rename" → inline input → "Save". Calls PUT endpoint, updates all events globally. Shows count of events updated.
+    - **Delete**: click "Delete" → confirm dialog → calls DELETE endpoint. Clears category from all events. Shows count of events cleared.
+    - **Event assignment**: simple `<select>` dropdown on each event row in the expanded series view. Highlighted in indigo when a category is assigned. Changes are immediate via PATCH endpoint.
+    - **Removed**: old inline text-editor approach (editingCategoryEventId, categoryInput, knownCategories states) replaced entirely with the panel + dropdown pattern.
+
+107. **Mention history category filter** — `src/app/api/corpus/mention-history/route.ts` accepts optional `?category=` query parameter. Added `category` to the events join select. In the aggregation loop, skips events where `events.category !== category` when the filter is active. The corpus page (`src/app/corpus/page.tsx`) shows a category filter dropdown on the Mention History tab, with state management for `categories`, `selectedCategory`, and `fetchCategories`.
+
+108. **Research pipeline category support** — `src/app/api/research/trigger/route.ts` accepts optional `corpusCategory` in the request body. When provided:
+    - Filters corpus `event_results` by checking `events.category === corpusCategory` before building `corpusMentionRates`
+    - Stores `corpus_category` on the `research_runs` record for tracking
+    - The synthesizer only sees mention rates from events matching the selected category
+
+109. **Home page category dropdown** — `src/app/page.tsx` updated: fetches categories when a speaker is selected, shows a "Corpus Category" dropdown alongside the speaker dropdown. Selected category is passed as `?corpusCategory=xxx` URL parameter when navigating to the research page. Defaults to "All categories" (no filter).
+
+110. **Research page category integration** — `src/app/research/[eventId]/page.tsx` reads `corpusCategory` from URL search params, fetches categories for the selected speaker, manages `categories` and `selectedCategory` state. Passes category to both the mention-history fetch and the research trigger API. The `WordTable` component receives `categories`, `selectedCategory`, and `onCategoryChange` as optional props and shows a category dropdown next to the speaker selector.
+
+111. **Series events API: category field** — `src/app/api/corpus/series/events/route.ts` updated to include `category` in the events select and response. Each event in the response now has `category: string | null`.

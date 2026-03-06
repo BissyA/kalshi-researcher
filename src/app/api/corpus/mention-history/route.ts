@@ -5,6 +5,10 @@ import type { MentionHistoryRow, MentionEventDetail } from "@/types/corpus";
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const speakerId = searchParams.get("speakerId");
+  const categoryParam = searchParams.get("category");
+  const categorySet = categoryParam
+    ? new Set(categoryParam.split(",").map((c) => c.trim()).filter(Boolean))
+    : null;
 
   const supabase = getServerSupabase();
 
@@ -16,7 +20,7 @@ export async function GET(request: Request) {
     was_mentioned: boolean;
     settled_at: string | null;
     words: { word: string; kalshi_market_ticker: string };
-    events: { id: string; title: string; kalshi_event_ticker: string; event_date: string | null; speaker: string; series_id: string | null };
+    events: { id: string; title: string; kalshi_event_ticker: string; event_date: string | null; speaker: string; series_id: string | null; category: string | null };
   }
 
   const PAGE_SIZE = 1000;
@@ -40,7 +44,8 @@ export async function GET(request: Request) {
           kalshi_event_ticker,
           event_date,
           speaker,
-          series_id
+          series_id,
+          category
         )
       `)
       .range(offset, offset + PAGE_SIZE - 1);
@@ -89,6 +94,11 @@ export async function GET(request: Request) {
       if (!eventData.series_id || !allowedSeriesIds.has(eventData.series_id)) {
         continue;
       }
+    }
+
+    // Filter by category if specified (supports multiple comma-separated)
+    if (categorySet && (!eventData.category || !categorySet.has(eventData.category))) {
+      continue;
     }
 
     const normalizedWord = wordData.word.toLowerCase();
