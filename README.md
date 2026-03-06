@@ -87,6 +87,8 @@ The research happens in two layers:
 - Model preset selection from home page → research page → trigger API → orchestrator → agents
 - Model preset tag display on completed research runs in RunHistory
 - Retry logic on overloaded API errors (Haiku preset triggered 529 errors — retry helped but Haiku + web search remains unstable)
+- Haiku (All) baseline research run completed end-to-end (Trump College Sports Roundtable, Mar 6 2026) — all 8 agents, synthesis, word scores saved
+- Citation tag stripping verified — web search `<cite>` tags no longer appear in agent outputs
 
 ---
 
@@ -597,6 +599,7 @@ The Claude client wraps the Anthropic SDK for two use cases:
   1. Extract from markdown code fences (```json ... ```)
   2. Parse the entire text as raw JSON
   3. **Balanced-brace parser**: Finds the first `{` and walks character-by-character tracking depth, string boundaries, and escape characters to find the matching `}`. This is more robust than regex for responses where Claude wraps JSON in explanatory text.
+- **Citation tag stripping**: After extracting text content, `callAgent()` strips all web search citation tags (`<cite index="...">...</cite>` and `</cite>`) via regex: `finalTextContent.replace(/<\/?cite[^>]*>/g, "")`. Without this, Claude's web search tool embeds raw `<cite index="1-2,3-4">` markup in its responses, which pollutes agent JSON outputs and renders as visible HTML in the UI. Applied globally so all 5 web-search-enabled agents (historical, agenda, news-cycle, event-format, recent-recordings) benefit automatically.
 - **JSON retry**: If parsing fails, `callAgentForJson` makes a second Claude call asking it to fix the malformed JSON. This adds to token usage but prevents pipeline crashes.
 
 **Cost tracking**: Every call returns token counts with per-model cost estimation. The orchestrator accumulates these across all agents and stores them on the research run.
@@ -656,7 +659,7 @@ All agents live in `src/agents/`. Each exports a single `run*Agent(input)` funct
 | News Cycle | `news-cycle.ts` | Yes | 16,384 | Analyzes recent news with contextual lookback (24h for imminent events, 72h+ for further out). Speaker-agnostic platform references. **Runs on both baseline and current layers** |
 | Event Format | `event-format.ts` | Yes | 8,192 | Determines duration, scripted vs unscripted ratio, outputs weighting factors |
 | Market Analysis | `market-analysis.ts` | No | 12,288 | Pure price/volume analysis, identifies mispricings, correlations |
-| Recent Recordings | `recent-recordings.ts` | Yes | 4,000 | Searches for the 3 most recent video recordings of similar events by the same speaker. Prioritizes YouTube/C-SPAN. Returns URLs, titles, dates, platform, duration, description, selection rationale, and search queries used. |
+| Recent Recordings | `recent-recordings.ts` | Yes | 4,000 | Searches for the 3 most recent video recordings of similar events by the same speaker. Prioritizes YouTube/C-SPAN. Explicit deduplication instructions prevent returning the same event twice with different titles. Returns URLs, titles, dates, platform, duration, description, selection rationale, and search queries used. |
 
 ### Phase 2 Agent
 
@@ -840,6 +843,8 @@ recent-recordings┘
 ### Phase 2: Clustering → Phase 3: Synthesis → Phase 4: Persistence
 
 All DB writes are individually wrapped in try/catch — a failed write doesn't crash the pipeline.
+
+**Null safety on LLM outputs**: The synthesizer and clustering agent outputs are accessed with `?? []` fallbacks before iteration: `synthesisResult.data.wordScores ?? []` and `clusteringResult.data.clusters ?? []`. This is critical because the TypeScript target is `ES2017`, which downlevels `for...of` loops on arrays to classic `for` loops using `.length`. If an LLM (especially Haiku) returns JSON missing the expected array field, `undefined.length` would crash the pipeline. The `?? []` fallback ensures the pipeline completes (with 0 scores saved) rather than failing. The trigger route also uses `?.length ?? 0` when accessing result arrays in the SSE completion event.
 
 ### Corpus Data Flow
 
@@ -1390,6 +1395,7 @@ New events imported via "Refresh" come in with `category = null` (uncategorized)
 - **Supabase 1000-row limit**: All queries returning potentially large result sets must paginate. The corpus APIs handle this, but any new API routes querying large tables should use `.range()` pagination.
 - **Agent-level retry**: Individual agent failures get fallback empty results, no automatic retry at the agent level. However, the Claude client now has retry with exponential backoff for transient API errors (429, 529, 500/502/503, connection errors).
 - **Haiku + web search overload**: The Haiku (All) preset has been observed to trigger `overloaded_error` (529) from the Anthropic API when agents use the `web_search` tool. In testing, all 4 Phase 1 agents with web search failed, while market_analysis (no web search) succeeded. The retry logic (4 retries, 3s base delay) may help for transient overloads, but sustained Haiku capacity issues with web search remain a known issue. **Workaround**: Use the Hybrid preset instead — it only assigns Haiku to event_format and clustering, which don't use web search.
+- **Haiku synthesis quality**: Haiku may return synthesis JSON with missing or differently-named fields (e.g., `wordScores` absent). The pipeline now handles this gracefully via `?? []` fallbacks, but the run will complete with 0 word scores. Check the `synthesis_result` JSONB in the DB to see what the model actually returned. Consider using Hybrid or Sonnet for more reliable synthesis output.
 - **Multiple concurrent research runs**: Untested.
 - **Baseline layer**: One baseline run tested. News cycle agent now runs on both layers but baseline-specific results have limited production testing.
 - **Event types beyond speeches**: Only `address_to_congress` type events tested end-to-end with research.
@@ -1415,6 +1421,8 @@ New events imported via "Refresh" come in with `category = null` (uncategorized)
 - **Retry logging**: All API failures logged as `[claude-client] API call failed (model=..., attempt X/Y, retryable=...): ...`. Look for these in server console to debug transient errors.
 - **Model-specific issues**: Haiku 4.5 has been observed to fail with `overloaded_error` (529) when using web search. Check `[orchestrator] Phase 1 agent failed:` logs for which agents specifically failed.
 - **Default model**: Sonnet 4.5 (`claude-sonnet-4-5-20250929`). Changed from Opus 4.0 in Phase 12.
+- **Citation tags in old data**: Research runs completed before the citation stripping fix (Phase 19) may have raw `<cite index="...">...</cite>` tags in their JSONB agent results. These are cosmetic — the data is correct, just has HTML markup. Re-running research will produce clean outputs.
+- **ES2017 downleveling**: TypeScript target is `ES2017` (see `tsconfig.json`). This means `for...of` on arrays is transpiled to classic `for` loops using `.length`. Any `for...of` on a potentially undefined value will throw `"Cannot read properties of undefined (reading 'length')"` — NOT the usual `"undefined is not iterable"` error. Always use `?? []` or null-check before `for...of` on LLM-parsed data.
 
 ### Kalshi API
 - Website uses `/markets/` URLs, API uses `/events/`. Load route handles this.
@@ -1876,3 +1884,17 @@ Both layers: double the per-run cost. Failed runs still cost money. The default 
     - This prevents `__all__` from leaking into the WordTable display filter or the mention-history API
 
 146. **Synthesizer crash fix** — `src/agents/synthesizer.ts` fixed a crash when using the Haiku preset: `input.historicalResult.transcriptsFound.length` → `input.historicalResult.transcriptsFound?.length ?? 0`. Haiku sometimes returns an unexpected shape where `transcriptsFound` is undefined, causing "Cannot read properties of undefined (reading 'length')".
+
+### Phase 19: Pipeline Robustness & Output Quality (Mar 2026)
+
+147. **Orchestrator null safety for LLM outputs** — `src/agents/orchestrator.ts` fixed a crash where the pipeline would fail with `"Cannot read properties of undefined (reading 'length')"` when the synthesizer (especially Haiku) returned JSON missing the `wordScores` array. Root cause: TypeScript target is `ES2017`, so `for...of` loops are transpiled to classic `for` loops that access `.length` on the iterable. When `synthesisResult.data.wordScores` was `undefined`, the transpiled code tried `undefined.length`. Three fixes:
+    - `const wordScores = synthesisResult.data.wordScores ?? []` — safe extraction before the for-of loop (line 416)
+    - `clusteringResult.data.clusters ?? []` — same pattern for the clusters for-of loop (line 389)
+    - Return value uses the safe `wordScores` variable and `clusters ?? []` fallback (lines 476-477)
+    - `console.log` line updated to use the safe `wordScores.length` instead of `synthesisResult.data.wordScores.length` (line 449)
+
+148. **Trigger route null safety** — `src/app/api/research/trigger/route.ts` fixed potential crash on the SSE completion event. `result.wordScores.length` and `result.clusters.length` changed to `result.wordScores?.length ?? 0` and `result.clusters?.length ?? 0` (lines 313-314). Without this, if the orchestrator returned undefined arrays (possible when LLM outputs are malformed), the SSE event send would throw after the pipeline had already saved results to the DB.
+
+149. **Web search citation tag stripping** — `src/lib/claude-client.ts` added `finalTextContent.replace(/<\/?cite[^>]*>/g, "")` after extracting text content from Claude's response (line 197). Claude's `web_search_20250305` server-side tool embeds `<cite index="1-2,3-4">...</cite>` citation markers in its text responses. Without stripping, these raw HTML tags appear in agent JSON outputs and render as visible markup in the UI (EventContext, AgentOutputAccordion, etc.). The regex removes both opening `<cite ...>` and closing `</cite>` tags globally. Applied in `callAgent()` so all 5 web-search-enabled agents benefit automatically (historical, agenda, news-cycle, event-format, recent-recordings). The 3 non-web-search agents (market-analysis, clustering, synthesizer) are unaffected since they never produce citation tags.
+
+150. **Recent recordings deduplication** — `src/agents/recent-recordings.ts` updated the prompt's IMPORTANT section to explicitly instruct the agent to deduplicate recordings. Added: "Each recording MUST be a DIFFERENT event (different date or different occasion). Do NOT return the same event twice with slightly different titles or descriptions. Deduplicate by checking dates and event details." Previously, web search results for similar queries (e.g., "Trump roundtable C-SPAN") could return the same event from different pages, and the agent would treat them as separate recordings with slightly different descriptions.

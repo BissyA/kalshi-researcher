@@ -15,8 +15,20 @@ export function LoggedTrades({ trades, wordScores, words, onTradeUpdated }: Logg
   const [draftEntry, setDraftEntry] = useState("");
   const [draftQty, setDraftQty] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   if (trades.length === 0) return null;
+
+  async function deleteTrade(tradeId: string) {
+    if (!confirm("Delete this trade?")) return;
+    setDeletingId(tradeId);
+    try {
+      const res = await fetch(`/api/trades/${tradeId}`, { method: "DELETE" });
+      if (res.ok) onTradeUpdated?.();
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   function startEdit(trade: Trade) {
     setEditingId(trade.id);
@@ -171,25 +183,36 @@ export function LoggedTrades({ trades, wordScores, words, onTradeUpdated }: Logg
                       {trade.pnl_cents != null ? `${trade.pnl_cents}¢` : "-"}
                     </td>
                     <td className="px-2 py-3">
-                      {isEditing ? (
-                        <div className="flex gap-1">
+                      <div className="flex gap-1 items-center">
+                        {isEditing ? (
+                          <>
+                            <button
+                              onClick={() => saveEdit(trade)}
+                              disabled={saving}
+                              className="text-green-400 hover:text-green-300 text-xs px-1"
+                              title="Save"
+                            >
+                              {saving ? "..." : "✓"}
+                            </button>
+                            <button
+                              onClick={cancelEdit}
+                              className="text-zinc-500 hover:text-zinc-300 text-xs px-1"
+                              title="Cancel"
+                            >
+                              ✕
+                            </button>
+                          </>
+                        ) : (
                           <button
-                            onClick={() => saveEdit(trade)}
-                            disabled={saving}
-                            className="text-green-400 hover:text-green-300 text-xs px-1"
-                            title="Save"
+                            onClick={() => deleteTrade(trade.id)}
+                            disabled={deletingId === trade.id}
+                            className="text-red-500/60 hover:text-red-400 text-xs px-1"
+                            title="Delete trade"
                           >
-                            {saving ? "..." : "✓"}
+                            {deletingId === trade.id ? "..." : "✕"}
                           </button>
-                          <button
-                            onClick={cancelEdit}
-                            className="text-zinc-500 hover:text-zinc-300 text-xs px-1"
-                            title="Cancel"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      ) : null}
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
