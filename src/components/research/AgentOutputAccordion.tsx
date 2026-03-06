@@ -10,6 +10,7 @@ const agentPanels = [
   { key: "newsCycle", label: "News Cycle Agent" },
   { key: "eventFormat", label: "Event Format Agent" },
   { key: "marketAnalysis", label: "Market Analysis Agent" },
+  { key: "recentRecordings", label: "Recent Recordings Agent" },
   { key: "clusters", label: "Word Clustering Agent" },
   { key: "synthesis", label: "Synthesizer Agent" },
 ] as const;

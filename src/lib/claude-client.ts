@@ -193,6 +193,9 @@ export async function callAgent(options: AgentCallOptions): Promise<AgentCallRes
     (totalInputTokens / 1_000_000) * pricing.input * 100 +
     (totalOutputTokens / 1_000_000) * pricing.output * 100;
 
+  // Strip web search citation tags (e.g. <cite index="1-2,3-4">...</cite>)
+  finalTextContent = finalTextContent.replace(/<\/?cite[^>]*>/g, "");
+
   return {
     content: finalTextContent,
     inputTokens: totalInputTokens,

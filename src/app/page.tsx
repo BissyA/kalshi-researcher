@@ -45,7 +45,8 @@ export default function HomePage() {
   const [selectedSpeakerId, setSelectedSpeakerId] = useState("");
   const [modelPreset, setModelPreset] = useState("sonnet");
   const [categories, setCategories] = useState<string[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState("");
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [catDropdownOpen, setCatDropdownOpen] = useState(false);
 
   useEffect(() => {
     fetchPreviousEvents();
@@ -57,7 +58,7 @@ export default function HomePage() {
       fetchCategories(selectedSpeakerId);
     } else {
       setCategories([]);
-      setSelectedCategory("");
+      setSelectedCategories([]);
     }
   }, [selectedSpeakerId]);
 
@@ -66,7 +67,10 @@ export default function HomePage() {
       const res = await fetch(`/api/corpus/categories?speakerId=${speakerId}`);
       if (res.ok) {
         const data = await res.json();
-        setCategories(data.categories ?? []);
+        const cats = (data.categories ?? []).map((c: string | { name: string }) =>
+          typeof c === "string" ? c : c.name
+        );
+        setCategories(cats);
       }
     } catch {
       setCategories([]);
@@ -138,7 +142,7 @@ export default function HomePage() {
       }).catch(() => {});
     }
     const params = new URLSearchParams({ modelPreset });
-    if (selectedCategory) params.set("corpusCategory", selectedCategory);
+    if (selectedCategories.length > 0) params.set("corpusCategories", selectedCategories.join(","));
     router.push(`/research/${event.id}?${params.toString()}`);
   }
 
@@ -210,20 +214,85 @@ export default function HomePage() {
             {selectedSpeakerId && categories.length > 0 && (
               <div>
                 <label className="block text-sm text-zinc-400 mb-1">
-                  Corpus Category
+                  Corpus Categories
                 </label>
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="w-full max-w-xs px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-blue-500"
-                >
-                  <option value="">All categories</option>
-                  {categories.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat}
-                    </option>
-                  ))}
-                </select>
+                <div className="relative">
+                  <button
+                    onClick={() => setCatDropdownOpen(!catDropdownOpen)}
+                    className="w-full max-w-xs px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-white text-left focus:outline-none focus:border-blue-500 flex items-center justify-between gap-2"
+                  >
+                    <span className="truncate">
+                      {selectedCategories.length === 0
+                        ? "No corpus"
+                        : selectedCategories.filter((c) => c !== "__all__").length === 0 && selectedCategories.includes("__all__")
+                        ? "All"
+                        : selectedCategories.filter((c) => c !== "__all__").join(", ") + (selectedCategories.includes("__all__") ? " + All" : "")}
+                    </span>
+                    <svg className="w-3 h-3 text-zinc-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {catDropdownOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setCatDropdownOpen(false)} />
+                      <div className="absolute left-0 top-full mt-1 z-20 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[200px]">
+                        <label className="flex items-center gap-2.5 px-3 py-2 hover:bg-zinc-800 cursor-pointer text-sm text-zinc-200">
+                          <input
+                            type="checkbox"
+                            checked={selectedCategories.includes("__all__")}
+                            onChange={() => {
+                              if (selectedCategories.includes("__all__")) {
+                                setSelectedCategories(selectedCategories.filter((c) => c !== "__all__"));
+                              } else {
+                                setSelectedCategories([...selectedCategories, "__all__"]);
+                              }
+                            }}
+                            className="rounded border-zinc-600 bg-zinc-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0"
+                          />
+                          All
+                        </label>
+                        <div className="border-t border-zinc-700 my-1" />
+                        {categories.map((cat) => {
+                          const isChecked = selectedCategories.includes(cat);
+                          return (
+                            <label
+                              key={cat}
+                              className="flex items-center gap-2.5 px-3 py-2 hover:bg-zinc-800 cursor-pointer text-sm text-zinc-200"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {
+                                  if (isChecked) {
+                                    setSelectedCategories(selectedCategories.filter((c) => c !== cat));
+                                  } else {
+                                    setSelectedCategories([...selectedCategories, cat]);
+                                  }
+                                }}
+                                className="rounded border-zinc-600 bg-zinc-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0"
+                              />
+                              {cat}
+                            </label>
+                          );
+                        })}
+                        {selectedCategories.length > 0 && (
+                          <>
+                            <div className="border-t border-zinc-700 my-1" />
+                            <button
+                              onClick={() => {
+                                setSelectedCategories([]);
+                                setCatDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 text-xs text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                            >
+                              Clear all
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             )}
 

@@ -26,6 +26,9 @@ interface SynthesizerInput {
   marketAnalysisResult: MarketAnalysisResult;
   clusterResult: ClusterResult;
   corpusMentionRates?: Record<string, CorpusMentionRate>;
+  corpusMentionRatesAll?: Record<string, CorpusMentionRate>;
+  corpusCategories?: string[];
+  corpusTotalEvents?: number;
   model?: string;
 }
 
@@ -78,12 +81,28 @@ Important calibration guidance:
 - Be aware that market prices incorporate crowd wisdom — if you disagree significantly with the market, explain why with specific evidence.
 - For a ${input.eventFormatResult.estimatedDurationMinutes}-minute ${input.eventFormatResult.format} speech, adjust base rates accordingly (longer = higher probability for most words).
 ${hasCorpus ? `
-CORPUS DATA — CRITICAL: You have been provided empirical mention rates from ACTUAL settled Kalshi mention markets for this speaker. This is ground-truth data showing how often each word was actually mentioned across past events. When corpus data is available for a word:
+CORPUS DATA — CRITICAL: You have been provided empirical mention rates from ACTUAL settled Kalshi mention markets for this speaker. This is ground-truth data showing how often each word was actually mentioned across past events.
+${input.corpusCategories && input.corpusCategories.length > 0 ? `
+IMPORTANT — CORPUS FILTERING CONTEXT:
+You are receiving TWO corpus datasets:
+1. **FILTERED CORPUS** — filtered to [${input.corpusCategories.join(", ")}] events only. This is the most relevant data for this specific event type.
+2. **FULL CORPUS** — ALL event types for this speaker (${input.corpusTotalEvents ?? "unknown"} total events). This includes rallies, press conferences, roundtables, etc.
+
+Use the FILTERED rates as your primary anchor since they match this event's format. But COMPARE against the full rates to identify important divergences:
+- If a word is 60% in [${input.corpusCategories.join(", ")}] but 25% overall, this word is especially relevant to this event type — note this.
+- If a word is 10% in [${input.corpusCategories.join(", ")}] but 50% overall, this word is uncommon in this event format despite being common elsewhere — flag this.
+- Use the per-event detail to spot recency trends: was the word mentioned in the last 3 events? Has the pattern changed over time?
+- Consider sample size: a rate from 3 filtered events is much less reliable than a rate from 50 events overall.
+` : `
+NOTE: No category filter was applied — this corpus data includes ALL event types for this speaker (${input.corpusTotalEvents ?? "unknown"} total events). Be aware that different event formats (rallies vs press conferences vs roundtables) produce different mention patterns. A word with 40% overall rate might be 80% at rallies but 5% at press conferences. Use the per-event detail (including event titles, dates, and categories) to reason about which events are most comparable to the upcoming one.
+`}
+When corpus data is available for a word:
 - Use the corpus mention rate as your PRIMARY ANCHOR for baseRateProbability.
 - A word with a 75% corpus mention rate across 10+ events is extremely strong evidence — your baseRateProbability should be close to that rate.
 - Only deviate significantly from the corpus rate when you have strong, specific evidence that this event is different (e.g., different event format, strong agenda/news signals).
 - For words NOT in the corpus data, fall back to your general base rate estimate.
-- In your briefing, explicitly reference the corpus data: e.g., "Corpus data shows 'border' was mentioned in 9/12 past events (75% rate)."` : ""}
+- In your briefing, explicitly reference the corpus data with event-level detail: e.g., "Corpus shows 'border' mentioned in 9/12 events (75%), including the last 5 consecutive events. In Sports events specifically, it was 2/3 (67%)."
+- Call out significant divergences between filtered and full corpus rates where they exist.` : ""}
 
 In addition to the structured word scores, produce a comprehensive research briefing as a markdown document in the "briefing" field. This briefing will be the primary thing the trader reads. It must:
 1. Be written as a flowing narrative, not a list of bullet points
@@ -137,24 +156,52 @@ Return structured JSON in this exact format:
 
 You MUST include an entry in wordScores for EVERY word in the list. Sort strongYes and strongNo by absolute edge descending.`;
 
-  // Build corpus section if available
+  // Build corpus section(s) with per-event detail
+  function formatCorpusDataset(dataset: Record<string, CorpusMentionRate>, label: string): string {
+    const entries = Object.entries(dataset)
+      .sort((a, b) => b[1].totalEvents - a[1].totalEvents || b[1].mentionRate - a[1].mentionRate);
+
+    const lines = entries.map(([word, data]) => {
+      const eventDetails = data.events
+        .map((evt) => {
+          const date = evt.eventDate ? new Date(evt.eventDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "unknown date";
+          const cat = evt.category ? ` [${evt.category}]` : "";
+          return `${evt.wasMentioned ? "YES" : "NO"} — ${evt.eventTitle} (${date}${cat})`;
+        })
+        .join("\n      ");
+      return `  ${word}: ${Math.round(data.mentionRate * 100)}% (${data.yesCount}/${data.totalEvents} events)\n      ${eventDetails}`;
+    });
+
+    return `\n=== ${label} ===\n${lines.join("\n")}`;
+  }
+
   let corpusSection = "";
   if (hasCorpus) {
-    const corpusLines = Object.entries(input.corpusMentionRates!)
-      .sort((a, b) => b[1].totalEvents - a[1].totalEvents || b[1].mentionRate - a[1].mentionRate)
-      .map(([word, data]) =>
-        `  ${word}: ${Math.round(data.mentionRate * 100)}% mention rate (${data.yesCount}/${data.totalEvents} events)`
-      )
-      .join("\n");
-    corpusSection = `\n=== CORPUS MENTION HISTORY (Settled Kalshi Markets) ===
-This is EMPIRICAL DATA from actual settled Kalshi mention markets for ${input.speaker}. Each rate represents how often the word was actually mentioned across past events.
-${corpusLines}
-`;
+    const hasCategories = input.corpusCategories && input.corpusCategories.length > 0;
+    const hasAllData = input.corpusMentionRatesAll && Object.keys(input.corpusMentionRatesAll).length > 0;
+
+    if (hasCategories && hasAllData) {
+      // Show both filtered and full datasets
+      corpusSection = formatCorpusDataset(
+        input.corpusMentionRates!,
+        `CORPUS — FILTERED TO [${input.corpusCategories!.join(", ")}] (${new Set(Object.values(input.corpusMentionRates!).flatMap(d => d.events.map(e => e.eventTicker))).size} events)`
+      );
+      corpusSection += "\n" + formatCorpusDataset(
+        input.corpusMentionRatesAll!,
+        `CORPUS — ALL EVENT TYPES (${input.corpusTotalEvents ?? "unknown"} total events)`
+      );
+    } else {
+      // No category filter — show single dataset
+      corpusSection = formatCorpusDataset(
+        input.corpusMentionRates!,
+        `CORPUS MENTION HISTORY — ALL EVENT TYPES (${input.corpusTotalEvents ?? "unknown"} total events)`
+      );
+    }
   }
 
   const researchData = `
 === HISTORICAL TRANSCRIPT ANALYSIS ===
-Transcripts found: ${input.historicalResult.transcriptsFound.length}
+Transcripts found: ${input.historicalResult.transcriptsFound?.length ?? 0}
 ${JSON.stringify(input.historicalResult, null, 2)}
 
 === AGENDA / PREVIEW ANALYSIS ===

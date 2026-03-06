@@ -80,6 +80,7 @@ export async function GET(
           newsCycle: latestCompletedRun.news_cycle_result,
           eventFormat: latestCompletedRun.event_format_result,
           marketAnalysis: latestCompletedRun.market_analysis_result,
+          recentRecordings: latestCompletedRun.recent_recordings_result,
           clusters: latestCompletedRun.cluster_result,
           synthesis: latestCompletedRun.synthesis_result,
         }

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase";
 import { runResearchPipeline } from "@/agents/orchestrator";
-import { OrchestratorInput, CorpusMentionRate, ModelPreset } from "@/types/research";
+import { OrchestratorInput, CorpusMentionRate, CorpusEventDetail, ModelPreset } from "@/types/research";
 
 export const maxDuration = 300; // 5 minutes for Vercel
 
@@ -10,7 +10,9 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { eventId, layer = "baseline", speakerId, modelPreset = "sonnet", corpusCategory, corpusCategories } = body;
     // Support both old single category and new multi-category format
-    const effectiveCategories: string[] = corpusCategories ?? (corpusCategory ? [corpusCategory] : []);
+    const rawCategories: string[] = corpusCategories ?? (corpusCategory ? [corpusCategory] : []);
+    const includeAllCorpus = rawCategories.includes("__all__");
+    const effectiveCategories: string[] = rawCategories.filter((c: string) => c !== "__all__");
     const validPresets: ModelPreset[] = ["opus", "hybrid", "sonnet", "haiku"];
     const effectivePreset: ModelPreset = validPresets.includes(modelPreset) ? modelPreset : "sonnet";
 
@@ -56,6 +58,8 @@ export async function POST(request: Request) {
 
     // Fetch corpus mention rates for the selected speaker
     let corpusMentionRates: Record<string, CorpusMentionRate> | undefined;
+    let corpusMentionRatesAll: Record<string, CorpusMentionRate> | undefined;
+    let corpusTotalEvents: number | undefined;
     const effectiveSpeakerId = speakerId || event.speaker_id;
     if (effectiveSpeakerId) {
       try {
@@ -68,13 +72,13 @@ export async function POST(request: Request) {
         const seriesIds = (seriesData ?? []).map((s) => s.id);
 
         if (seriesIds.length > 0) {
-          // Fetch all event_results for events in these series, paginated
+          // Fetch all event_results with full event detail, paginated
           const PAGE_SIZE = 1000;
           let offset = 0;
           const allResults: Array<{
             was_mentioned: boolean;
             words: { word: string };
-            events: { series_id: string | null; category: string | null };
+            events: { series_id: string | null; category: string | null; title: string; kalshi_event_ticker: string; event_date: string | null };
           }> = [];
 
           while (true) {
@@ -83,7 +87,7 @@ export async function POST(request: Request) {
               .select(`
                 was_mentioned,
                 words!inner ( word ),
-                events!inner ( series_id, category )
+                events!inner ( series_id, category, title, kalshi_event_ticker, event_date )
               `)
               .range(offset, offset + PAGE_SIZE - 1);
 
@@ -93,30 +97,64 @@ export async function POST(request: Request) {
             offset += PAGE_SIZE;
           }
 
-          // Filter to this speaker's series and build mention rate map
-          const wordMap = new Map<string, { yesCount: number; totalCount: number }>();
-          for (const row of allResults) {
-            if (!row.events.series_id || !seriesIds.includes(row.events.series_id)) continue;
-            // Filter by corpus categories if specified
-            if (effectiveCategories.length > 0 && (!row.events.category || !effectiveCategories.includes(row.events.category))) continue;
-            const normalizedWord = row.words.word.toLowerCase();
-            if (!wordMap.has(normalizedWord)) {
-              wordMap.set(normalizedWord, { yesCount: 0, totalCount: 0 });
-            }
-            const entry = wordMap.get(normalizedWord)!;
-            entry.totalCount++;
-            if (row.was_mentioned) entry.yesCount++;
-          }
+          // Filter to this speaker's series only
+          const speakerResults = allResults.filter(
+            (row) => row.events.series_id && seriesIds.includes(row.events.series_id)
+          );
 
-          if (wordMap.size > 0) {
-            corpusMentionRates = {};
+          // Count total distinct events across all categories
+          const allEventTickers = new Set(speakerResults.map((r) => r.events.kalshi_event_ticker));
+          corpusTotalEvents = allEventTickers.size;
+
+          // Helper to build corpus dataset from a set of results
+          function buildCorpusDataset(results: typeof speakerResults): Record<string, CorpusMentionRate> | undefined {
+            const wordMap = new Map<string, { yesCount: number; totalCount: number; events: CorpusEventDetail[] }>();
+            for (const row of results) {
+              const normalizedWord = row.words.word.toLowerCase();
+              if (!wordMap.has(normalizedWord)) {
+                wordMap.set(normalizedWord, { yesCount: 0, totalCount: 0, events: [] });
+              }
+              const entry = wordMap.get(normalizedWord)!;
+              entry.totalCount++;
+              if (row.was_mentioned) entry.yesCount++;
+              entry.events.push({
+                eventTitle: row.events.title,
+                eventDate: row.events.event_date,
+                eventTicker: row.events.kalshi_event_ticker,
+                wasMentioned: row.was_mentioned,
+                category: row.events.category,
+              });
+            }
+
+            if (wordMap.size === 0) return undefined;
+
+            const dataset: Record<string, CorpusMentionRate> = {};
             for (const [word, stats] of wordMap) {
-              corpusMentionRates[word] = {
+              dataset[word] = {
                 mentionRate: stats.totalCount > 0 ? stats.yesCount / stats.totalCount : 0,
                 yesCount: stats.yesCount,
                 totalEvents: stats.totalCount,
+                events: stats.events.sort((a, b) => (b.eventDate ?? "").localeCompare(a.eventDate ?? "")),
               };
             }
+            return dataset;
+          }
+
+          // Build unfiltered dataset only if "All" was explicitly selected
+          const allDataset = buildCorpusDataset(speakerResults);
+          if (includeAllCorpus) {
+            corpusMentionRatesAll = allDataset;
+          }
+
+          // Build filtered dataset (category-filtered if categories selected)
+          if (effectiveCategories.length > 0) {
+            const filteredResults = speakerResults.filter(
+              (row) => row.events.category && effectiveCategories.includes(row.events.category)
+            );
+            corpusMentionRates = buildCorpusDataset(filteredResults);
+          } else if (includeAllCorpus) {
+            // Only "All" ticked, no specific categories
+            corpusMentionRates = allDataset;
           }
         }
       } catch (corpusErr) {
@@ -223,6 +261,9 @@ export async function POST(request: Request) {
           modelPreset: effectivePreset,
           existingResearch,
           corpusMentionRates,
+          corpusMentionRatesAll,
+          corpusCategories: effectiveCategories.length > 0 ? effectiveCategories : undefined,
+          corpusTotalEvents,
         };
 
         // Try to get current prices from Kalshi
@@ -269,8 +310,8 @@ export async function POST(request: Request) {
             type: "completed",
             runId: researchRun.id,
             tokenUsage: result.tokenUsage,
-            wordScoresCount: result.wordScores.length,
-            clustersCount: result.clusters.length,
+            wordScoresCount: result.wordScores?.length ?? 0,
+            clustersCount: result.clusters?.length ?? 0,
           });
         } catch (error) {
           sendEvent({

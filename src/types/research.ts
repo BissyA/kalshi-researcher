@@ -142,6 +142,19 @@ export interface ClusterResult {
   }>;
 }
 
+export interface RecentRecordingsResult {
+  recordings: Array<{
+    title: string;
+    date: string;
+    url: string;
+    platform: string;
+    durationMinutes: number | null;
+    description: string;
+  }>;
+  selectionRationale: string;
+  searchQueries: string[];
+}
+
 export interface SynthesisResult {
   briefing?: string;
   wordScores: Array<{
@@ -173,10 +186,19 @@ export interface SynthesisResult {
 
 // ── Corpus Types ──
 
+export interface CorpusEventDetail {
+  eventTitle: string;
+  eventDate: string | null;
+  eventTicker: string;
+  wasMentioned: boolean;
+  category: string | null;
+}
+
 export interface CorpusMentionRate {
   mentionRate: number;
   yesCount: number;
   totalEvents: number;
+  events: CorpusEventDetail[];
 }
 
 // ── Orchestrator Types ──
@@ -209,6 +231,9 @@ export interface OrchestratorInput {
     marketAnalysisResult?: MarketAnalysisResult;
   };
   corpusMentionRates?: Record<string, CorpusMentionRate>;
+  corpusMentionRatesAll?: Record<string, CorpusMentionRate>;
+  corpusCategories?: string[];
+  corpusTotalEvents?: number;
 }
 
 export interface OrchestratorOutput {
@@ -238,6 +263,7 @@ export type AgentName =
   | "news_cycle"
   | "event_format"
   | "market_analysis"
+  | "recent_recordings"
   | "clustering"
   | "synthesizer";
 

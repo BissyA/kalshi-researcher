@@ -17,8 +17,8 @@ export async function runNewsCycleAgent(
   const systemPrompt = `You are a political media analyst. Analyze the current news cycle to predict which topics ${input.speaker} is likely to bring up at ${input.eventTitle} on ${input.eventDate}.
 
 Search for:
-1. Top news stories in the last 72 hours that ${input.speaker} has commented on
-2. ${input.speaker}'s recent public statements, interviews, and social media posts
+1. Top recent news stories that ${input.speaker} has commented on — focus on the last 24 hours for imminent events, expand to 72+ hours for events further out
+2. ${input.speaker}'s recent public statements, interviews, and social media posts across all platforms
 3. Trending political topics and controversies
 4. Any breaking news that could shift the event's focus
 5. What opponents/critics have been saying that ${input.speaker} might respond to
@@ -66,7 +66,7 @@ Include an entry in wordImplications for EVERY word in the list.`;
 Map current events to these mention market words:
 ${wordList}
 
-Focus on the last 72 hours of news and statements.`;
+Focus on the most recent news and statements — prioritize the last 24-72 hours, scaling the window based on how soon the event is.`;
 
   return callAgentForJson<NewsCycleResult>({
     systemPrompt,

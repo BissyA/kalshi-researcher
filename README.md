@@ -43,7 +43,7 @@ Kalshi offers "mention markets" where you bet on whether a speaker will say a sp
 This tool:
 
 1. **Loads** a Kalshi mention market event by URL or ticker
-2. **Runs 7 AI research agents** (powered by Claude, with configurable model presets: Opus, Hybrid, Sonnet, Haiku) to analyze historical patterns, current news, agenda items, market pricing, and corpus settlement data (ground truth mention rates from Kalshi)
+2. **Runs 8 AI research agents** (powered by Claude, with configurable model presets: Opus, Hybrid, Sonnet, Haiku) to analyze historical patterns, current news, agenda items, market pricing, corpus settlement data (ground truth mention rates from Kalshi), and recent video recordings of similar events
 3. **Produces per-word probability estimates** with reasoning
 4. **Surfaces structured event context** — event format, duration, Q&A expectations, agenda analysis, exogenous events, likely topics, and recent speaker statements extracted from agent results
 5. **Displays corpus-integrated word analysis** — live market prices cross-referenced against historical mention rates from Kalshi settled market data (ground truth), with manual speaker selection, expandable per-event detail, and edge detection
@@ -55,14 +55,15 @@ This tool:
 11. **Tracks word mention rates** across all historical Kalshi events per speaker via the Corpus page
 12. **Manages Kalshi market series** — search and add series from the Kalshi API, import historical settled events, refresh data per-series
 13. **Quick Analysis** — paste a Kalshi mention market URL to instantly compare live market prices against historical mention rates, with WebSocket live price updates, saved search persistence, and edge detection
-14. **Corpus categories** — organize events by type (Rally, Press Conference, Sports, etc.) to filter mention rates by event category. Categories are managed per-speaker with full CRUD. Research runs can be scoped to one or more categories so the synthesizer only sees relevant historical data.
+14. **Corpus categories** — organize events by type (Rally, Press Conference, Sports, etc.) to filter mention rates by event category. Categories are managed per-speaker with full CRUD. Research runs can be scoped to one or more categories so the synthesizer only sees relevant historical data. The home page has an explicit "All" checkbox (`__all__` sentinel) to control whether the full unfiltered corpus is passed to agents.
 15. **Refresh Markets** — pull in newly added Kalshi strikes for an event without re-running research. Unscored words appear in the Word Analysis table with corpus data if available.
+16. **Recent Recordings** — the research pipeline finds and displays the 3 most recent video recordings of similar events (e.g., last 3 press briefings for a press briefing event), with direct links to YouTube/C-SPAN/official sources for the trader to watch in preparation.
 
 The research happens in two layers:
-- **Baseline layer** (comprehensive): historical frequency, event format analysis, agenda research, news cycle analysis, market structure, corpus settlement data (when speaker is selected)
+- **Baseline layer** (comprehensive): historical frequency, event format analysis, agenda research, news cycle analysis, market structure, recent recordings search, corpus settlement data (when speaker is selected)
 - **Current layer** (refresh): re-runs all agents with latest data closer to the event. Reuses baseline results as context.
 
-**Both layers run all 7 agents.** The only difference is that current layer loads existing baseline results as additional context via `existingResearch`.
+**Both layers run all 8 agents.** The only difference is that current layer loads existing baseline results as additional context via `existingResearch`.
 
 ### What has been tested end-to-end
 - One successful "current" layer research run (Trump Corpus Christi speech, Feb 28 2026)
@@ -81,6 +82,8 @@ The research happens in two layers:
 - News Cycle agent runs on both baseline and current layers
 - Corpus data injection: selected speaker's settled Kalshi mention rates fed into synthesizer as empirical base rates
 - Home page speaker selection flows through to research pipeline and analytics
+- Home page multi-select category dropdown with checkbox pattern (Phase 17)
+- Home page category API normalization fix (Phase 17 — API returns `{name, count}` objects, not strings)
 - Model preset selection from home page → research page → trigger API → orchestrator → agents
 - Model preset tag display on completed research runs in RunHistory
 - Retry logic on overloaded API errors (Haiku preset triggered 529 errors — retry helped but Haiku + web search remains unstable)
@@ -130,7 +133,8 @@ kalshi-research/
 │       ├── 004_speakers_and_series.sql # speakers + series tables, events.series_id FK
 │       ├── 005_event_speaker_id.sql   # events.speaker_id FK to speakers table
 │       ├── 006_excluded_tickers.sql   # excluded_tickers TEXT[] on series table
-│       └── 007_corpus_categories.sql  # events.category TEXT, research_runs.corpus_category TEXT
+│       ├── 007_corpus_categories.sql  # events.category TEXT, research_runs.corpus_category TEXT
+│       └── 008_recent_recordings.sql # research_runs.recent_recordings_result JSONB
 │
 └── src/
     ├── types/
@@ -152,14 +156,15 @@ kalshi-research/
     │   └── useLivePrices.ts      # Client-side EventSource hook for live Kalshi prices
     │
     ├── agents/
-    │   ├── orchestrator.ts       # 3-phase pipeline with model preset routing, cancellation, transcript caching, corpus pass-through
+    │   ├── orchestrator.ts       # 3-phase pipeline with model preset routing, cancellation, transcript caching, dual corpus pass-through (filtered + full)
     │   ├── historical.ts         # Past speech transcript analysis
-    │   ├── agenda.ts             # Advance info + agenda research
-    │   ├── news-cycle.ts         # Last 72-hour news analysis
+    │   ├── agenda.ts             # Advance info + agenda research (speaker-agnostic platform references)
+    │   ├── news-cycle.ts         # Contextual news analysis (24-72h window scaled by event proximity)
     │   ├── event-format.ts       # Event structure analysis
     │   ├── market-analysis.ts    # Pure price/volume analysis
+    │   ├── recent-recordings.ts  # Web search for recent video recordings of similar events
     │   ├── clustering.ts         # Thematic word grouping
-    │   └── synthesizer.ts        # Final probability synthesis + markdown briefing + corpus-aware weighting
+    │   └── synthesizer.ts        # Final probability synthesis + markdown briefing + corpus-category-aware weighting with per-event detail
     │
     ├── components/
     │   ├── corpus/               # 8 components for the /corpus page
@@ -176,9 +181,10 @@ kalshi-research/
     │       ├── EventHeader.tsx
     │       ├── ProgressMessages.tsx
     │       ├── TabNavigation.tsx         # 3 tabs: Research | Sources | Trade Log
-    │       ├── EventContext.tsx          # **NEW** — Event structure + analysis from agent results
-    │       ├── WordTable.tsx             # **NEW** — Corpus-integrated word analysis with speaker selector
-    │       ├── AgentOutputAccordion.tsx
+    │       ├── EventContext.tsx          # Event structure + analysis from agent results
+    │       ├── WordTable.tsx             # Corpus-integrated word analysis with speaker selector
+    │       ├── RecentRecordings.tsx      # Clickable video cards for recent similar event recordings
+    │       ├── AgentOutputAccordion.tsx  # 8 agent panels including Recent Recordings Agent
     │       ├── WordScoresTable.tsx       # Used on Trade Log tab (not Research tab)
     │       ├── LoggedTrades.tsx
     │       ├── ResolveEvent.tsx
@@ -289,7 +295,7 @@ The `KALSHI_PRIVATE_KEY` env var takes precedence over `KALSHI_PRIVATE_KEY_PATH`
 
 **Supabase project**: `hczppfsuqtpccxvmyaue`
 
-All 7 migrations (001-007) have been applied to the live Supabase database.
+All 8 migrations (001-008) have been applied to the live Supabase database.
 
 10 tables + 2 views:
 
@@ -361,6 +367,7 @@ Each research execution against an event.
 | news_cycle_result | jsonb | Phase 1 agent output (runs on both layers) |
 | event_format_result | jsonb | Phase 1 agent output |
 | market_analysis_result | jsonb | Phase 1 agent output |
+| recent_recordings_result | jsonb | **Migration 008**. Phase 1 agent output — recent video recordings of similar events |
 | cluster_result | jsonb | Phase 2 agent output |
 | synthesis_result | jsonb | Phase 3 agent output |
 | total_input_tokens | integer | Accumulated across all agents |
@@ -463,6 +470,7 @@ Ground truth outcomes after events conclude.
 | 005_event_speaker_id.sql | Applied | events.speaker_id FK to speakers, index |
 | 006_excluded_tickers.sql | Applied | excluded_tickers TEXT[] on series table |
 | 007_corpus_categories.sql | Applied | events.category TEXT + index, research_runs.corpus_category TEXT |
+| 008_recent_recordings.sql | Applied | research_runs.recent_recordings_result JSONB |
 
 ---
 
@@ -517,7 +525,7 @@ speakers (manually created)
 - Fetches all `event_results` joined with `words` and `events`
 - **Paginates** to avoid Supabase's default 1000-row limit (fetches in 1000-row pages)
 - Filters by `speakerId` through the series linkage: looks up which series belong to the speaker, then filters events by `series_id`
-- **Optional `?category=` filter**: When provided, only includes events where `events.category` matches exactly. Events with `category = null` or a different category are excluded from the aggregation. This allows scoping mention rates to specific event types (e.g. only Rally events).
+- **Optional `?category=` filter**: Supports comma-separated multiple categories (e.g. `?category=Sports,Rally`). When provided, only includes events where `events.category` matches any of the specified categories. Events with `category = null` or a non-matching category are excluded from the aggregation. This allows scoping mention rates to specific event types.
 - Groups results by normalized word (case-insensitive)
 - Returns: `{ rows: MentionHistoryRow[], totalSettledEvents: number }`
 - Each row has: `word`, `yesCount`, `noCount`, `totalEvents`, `mentionRate`, and expandable `events[]` with per-event detail
@@ -644,10 +652,11 @@ All agents live in `src/agents/`. Each exports a single `run*Agent(input)` funct
 | Agent | File | Web Search | Max Tokens | Purpose |
 |-------|------|-----------|------------|---------|
 | Historical | `historical.ts` | Yes | 16,384 | Searches past speech transcripts, counts word frequencies. Accepts optional `cachedTranscripts` to skip redundant web searches. Returns per-transcript `wordMentions` map. |
-| Agenda | `agenda.ts` | Yes | 16,384 | Finds advance info, press releases, social media hints about topics |
-| News Cycle | `news-cycle.ts` | Yes | 16,384 | Analyzes last 72 hours of news for each word. **Runs on both baseline and current layers** |
+| Agenda | `agenda.ts` | Yes | 16,384 | Finds advance info, press releases, speaker's recent public statements about topics. Speaker-agnostic (no hardcoded platform references). |
+| News Cycle | `news-cycle.ts` | Yes | 16,384 | Analyzes recent news with contextual lookback (24h for imminent events, 72h+ for further out). Speaker-agnostic platform references. **Runs on both baseline and current layers** |
 | Event Format | `event-format.ts` | Yes | 8,192 | Determines duration, scripted vs unscripted ratio, outputs weighting factors |
 | Market Analysis | `market-analysis.ts` | No | 12,288 | Pure price/volume analysis, identifies mispricings, correlations |
+| Recent Recordings | `recent-recordings.ts` | Yes | 4,000 | Searches for the 3 most recent video recordings of similar events by the same speaker. Prioritizes YouTube/C-SPAN. Returns URLs, titles, dates, platform, duration, description, selection rationale, and search queries used. |
 
 ### Phase 2 Agent
 
@@ -659,7 +668,7 @@ All agents live in `src/agents/`. Each exports a single `run*Agent(input)` funct
 
 | Agent | File | Web Search | Max Tokens | Purpose |
 |-------|------|-----------|------------|---------|
-| Synthesizer | `synthesizer.ts` | No | **32,000** | Final per-word probabilities with reasoning. **Generates markdown briefing** (800-1500 words). Accepts corpus settlement data when available. |
+| Synthesizer | `synthesizer.ts` | No | **32,000** | Final per-word probabilities with reasoning. **Generates markdown briefing** (800-1500 words). Corpus-category-aware: receives both filtered and full corpus datasets with per-event detail. |
 
 **Synthesizer weighting formula:**
 ```
@@ -673,7 +682,19 @@ With corpus data (speaker selected):
   probability = historical + agenda + news + base_rate + corpus
 ```
 
-When corpus data is available, the synthesizer receives an additional `=== CORPUS MENTION HISTORY (Settled Kalshi Markets) ===` section showing per-word empirical mention rates (e.g., "border: 75% mention rate (9/12 events)"). The system prompt instructs the model to use corpus rates as the **primary anchor** for `baseRateProbability`, only deviating when there's strong evidence this event is different.
+**Corpus-category-aware synthesis (Phase 17):**
+
+When corpus data is available, the synthesizer receives corpus data as research sections with **full per-event detail** (event title, date, ticker, category, was_mentioned). The format depends on whether categories are selected:
+
+- **With categories selected** (e.g., "Sports"): Two corpus sections are injected:
+  1. `=== CORPUS — FILTERED TO [Sports] (8 events) ===` — per-word rates and per-event breakdown for matching events only
+  2. `=== CORPUS — ALL EVENT TYPES (114 total events) ===` — per-word rates and per-event breakdown across all event types
+  - The system prompt instructs the model to use **filtered rates as the primary anchor** and **compare against full rates** to identify divergences (e.g., "60% in Sports but 25% overall — flag this"). It also instructs the model to check recency trends, sample size concerns, and event-specific patterns using the per-event detail.
+
+- **Without categories selected**: A single corpus section is injected:
+  - `=== CORPUS MENTION HISTORY — ALL EVENT TYPES (114 total events) ===` — with a note that rates mix all event formats and the model should use per-event detail (titles, dates, categories) to reason about which events are most comparable.
+
+Per-event detail is formatted compactly: `YES — Trump Rally 2026-02-28 [Sports]` or `NO — Trump Press Conference 2026-02-15`. The model is instructed to cite corpus data with event-level detail in the briefing and call out significant divergences between filtered and full corpus rates.
 
 ### Agent Input/Output Types
 
@@ -727,10 +748,32 @@ interface SynthesisResult {
   };
 }
 
+interface CorpusEventDetail {
+  eventTitle: string;
+  eventDate: string | null;
+  eventTicker: string;
+  wasMentioned: boolean;
+  category: string | null;
+}
+
 interface CorpusMentionRate {
-  mentionRate: number;   // 0-1, e.g. 0.75 = mentioned in 75% of past events
-  yesCount: number;      // times mentioned
-  totalEvents: number;   // total events checked
+  mentionRate: number;       // 0-1, e.g. 0.75 = mentioned in 75% of past events
+  yesCount: number;          // times mentioned
+  totalEvents: number;       // total events checked
+  events: CorpusEventDetail[];  // full per-event breakdown (Phase 17)
+}
+
+interface RecentRecordingsResult {
+  recordings: Array<{
+    title: string;
+    date: string;
+    url: string;
+    platform: string;
+    durationMinutes: number | null;
+    description: string;
+  }>;
+  selectionRationale: string;
+  searchQueries: string[];
 }
 
 type ModelPreset = "opus" | "hybrid" | "sonnet" | "haiku";
@@ -744,7 +787,10 @@ interface OrchestratorInput {
   layer: "baseline" | "current";
   modelPreset?: ModelPreset;  // controls per-agent model selection, default "sonnet"
   existingResearch?: { historicalResult?; agendaResult?; eventFormatResult?; marketAnalysisResult? };
-  corpusMentionRates?: Record<string, CorpusMentionRate>;  // keyed by lowercase word
+  corpusMentionRates?: Record<string, CorpusMentionRate>;     // keyed by lowercase word (category-filtered if categories selected)
+  corpusMentionRatesAll?: Record<string, CorpusMentionRate>;  // keyed by lowercase word (always unfiltered, all event types)
+  corpusCategories?: string[];   // which categories were selected for filtering
+  corpusTotalEvents?: number;    // total events across all categories for this speaker
 }
 ```
 
@@ -758,12 +804,12 @@ interface OrchestratorInput {
 
 The orchestrator maps the user-selected `ModelPreset` to per-agent model assignments via `getAgentModels(preset)`:
 
-| Preset | Historical | Agenda | News Cycle | Event Format | Market Analysis | Clustering | Synthesizer |
-|--------|-----------|--------|------------|--------------|----------------|------------|-------------|
-| **Opus** (Full) | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 |
-| **Hybrid** | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Haiku 4.5 | Sonnet 4.5 | Haiku 4.5 | Opus 4.6 |
-| **Sonnet** (All) | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 |
-| **Haiku** (All) | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 |
+| Preset | Historical | Agenda | News Cycle | Event Format | Market Analysis | Recent Recordings | Clustering | Synthesizer |
+|--------|-----------|--------|------------|--------------|----------------|-------------------|------------|-------------|
+| **Opus** (Full) | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 | Opus 4.6 |
+| **Hybrid** | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Haiku 4.5 | Sonnet 4.5 | Haiku 4.5 | Haiku 4.5 | Opus 4.6 |
+| **Sonnet** (All) | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 | Sonnet 4.5 |
+| **Haiku** (All) | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 | Haiku 4.5 |
 
 Model constants: `OPUS = "claude-opus-4-6"`, `SONNET = "claude-sonnet-4-5-20250929"`, `HAIKU = "claude-haiku-4-5-20251001"`. Type: `ModelPreset = "opus" | "hybrid" | "sonnet" | "haiku"`.
 
@@ -783,11 +829,12 @@ Before each phase, the orchestrator queries `research_runs.status` — if `"canc
 
 ### Phase 1: Parallel Research
 ```
-historical ─┐
-agenda ─────┤
-news-cycle ─┼──→ Promise.allSettled() ──→ Save agent results to DB
-event-format┤
-market ─────┘
+historical ──────┐
+agenda ──────────┤
+news-cycle ──────┤
+event-format ────┼──→ Promise.allSettled() ──→ Save agent results to DB
+market ──────────┤
+recent-recordings┘
 ```
 
 ### Phase 2: Clustering → Phase 3: Synthesis → Phase 4: Persistence
@@ -798,11 +845,19 @@ All DB writes are individually wrapped in try/catch — a failed write doesn't c
 
 When a speaker is selected (via `speakerId` in the trigger request or from `event.speaker_id`):
 
-1. **Trigger API** fetches corpus data: `speakers` → `series` (by `speaker_id`) → `event_results` (paginated, joined with `words` and `events`) → filter by series → optionally filter by `corpusCategory` (if provided) → build `corpusMentionRates` map (word → { mentionRate, yesCount, totalEvents }). The `corpusCategory` is stored on `research_runs.corpus_category` for tracking.
-2. **Orchestrator** passes `corpusMentionRates` through to the synthesizer (single field pass-through, no transformation)
-3. **Synthesizer** receives corpus data as an additional research section, reallocates weight from base_rate to corpus (70/30 split), and instructs Claude to use corpus rates as the primary anchor for base rate probability
+1. **Trigger API** fetches corpus data: `speakers` → `series` (by `speaker_id`) → `event_results` (paginated, joined with `words` and `events` including title, ticker, date, category) → filter by series → build corpus datasets from the same query:
+   - `corpusMentionRates` — filtered by selected categories (if any), with full per-event detail (event title, date, ticker, wasMentioned, category). When only "All" is ticked (no specific categories), uses the full unfiltered dataset.
+   - `corpusMentionRatesAll` — **only populated when "All" (`__all__`) is explicitly ticked** on the home page category dropdown. Previously always included; now controlled by explicit user opt-in. When not ticked, this field is `undefined` and the synthesizer only sees filtered data.
+   - `corpusTotalEvents` — count of distinct events across all categories
+   - `corpusCategories` — which categories were selected (passed through for prompt context)
+   - The categories are stored as comma-separated string on `research_runs.corpus_category` for tracking.
+2. **Orchestrator** passes all corpus fields through to the synthesizer: `corpusMentionRates`, `corpusMentionRatesAll`, `corpusCategories`, `corpusTotalEvents` (no transformation)
+3. **Synthesizer** receives corpus data and builds one or two research sections depending on whether categories are selected:
+   - **With categories**: Two sections — filtered corpus (primary anchor) + full corpus (comparison). Prompt instructs the model to compare rates across both, flag divergences, check recency trends, and note sample size differences.
+   - **Without categories**: Single section — all events with a note about mixed formats. Per-event detail includes categories so the model can reason about which events are most comparable.
+   - Weight reallocation: 70% corpus / 30% base_rate (when corpus is present)
 
-If no speaker is selected or the speaker has no series/settlement data, `corpusMentionRates` is `undefined` and the synthesizer falls back to its standard weighting (no corpus weight). When `corpusCategory` is provided, only events with that exact category string contribute to the mention rates — events with `null` or different categories are excluded.
+If no speaker is selected or the speaker has no series/settlement data, all corpus fields are `undefined` and the synthesizer falls back to its standard weighting (no corpus weight). When categories are provided, only events matching the selected categories contribute to `corpusMentionRates` — events with `null` or non-matching categories are excluded from the filtered dataset but still appear in `corpusMentionRatesAll`.
 
 ---
 
@@ -815,7 +870,8 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 | `/api/events/load` | POST | Load event from Kalshi by URL or ticker. Parses event date from `sub_title` field (actual event date), falling back to `strike_date` then market `close_time`. |
 | `/api/events/list` | GET | List events with research runs (excludes corpus-only imports) |
 | `/api/events/speaker` | PATCH | Persist speaker selection on an event `{ eventId, speakerId }` |
-| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream). Accepts `{ eventId, layer, speakerId?, modelPreset?, corpusCategory? }`. `modelPreset` can be `"opus"`, `"hybrid"`, `"sonnet"` (default), or `"haiku"` — controls which Claude model each agent uses. Saved to `research_runs.model_used`. When `speakerId` is provided: persists to event, fetches corpus mention rates from settled Kalshi markets, passes to synthesizer. When `corpusCategory` is provided: filters corpus events by category before computing mention rates, and stores the category on `research_runs.corpus_category`. |
+| `/api/events/refresh-markets` | POST | Re-fetch markets from Kalshi for an existing event `{ eventId }`. Upserts any new active/open words not already in DB. Returns `{ newWords, totalWords, words }`. Used by the "Refresh Markets" button on the research WordTable to pull in newly added Kalshi strikes without re-running research. |
+| `/api/research/trigger` | POST | Start research pipeline (returns SSE stream). Accepts `{ eventId, layer, speakerId?, modelPreset?, corpusCategory?, corpusCategories? }`. `modelPreset` can be `"opus"`, `"hybrid"`, `"sonnet"` (default), or `"haiku"` — controls which Claude model each agent uses. Saved to `research_runs.model_used`. When `speakerId` is provided: persists to event, fetches corpus mention rates from settled Kalshi markets, passes to synthesizer. Supports multi-category filtering: `corpusCategories` (string array) takes precedence over `corpusCategory` (string, backwards-compatible). The `__all__` sentinel value in `corpusCategories` controls whether `corpusMentionRatesAll` (full unfiltered corpus) is passed to agents — it is stripped before category filtering. When categories are provided: filters corpus events to only include those matching any of the selected categories, and stores comma-separated categories on `research_runs.corpus_category`. |
 | `/api/research/stop` | POST | Cancel a running research run |
 | `/api/research/[eventId]` | GET | Get full research data for an event |
 | `/api/research/status/[runId]` | GET | Check status of a specific run |
@@ -854,7 +910,7 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 | `/api/corpus/categories` | PATCH | Assign category to events `{ eventIds: string[], category: string \| null }` |
 | `/api/corpus/categories` | PUT | Rename category globally `{ speakerId, oldName, newName }` — updates all events with old name |
 | `/api/corpus/categories` | DELETE | Delete category globally `?speakerId=...&name=...` — clears category from all matching events |
-| `/api/corpus/mention-history` | GET | Aggregated word mention rates `?speakerId=` (optional `?category=` filter) |
+| `/api/corpus/mention-history` | GET | Aggregated word mention rates `?speakerId=` (optional `?category=` filter, supports comma-separated multi-category e.g. `?category=Sports,Rally`) |
 | `/api/corpus/import-historical` | POST | Import settled events from Kalshi `{ seriesId }` |
 | `/api/corpus/kalshi-series` | GET | Search Kalshi API for series `?q=` (cached 10min) |
 | `/api/corpus/quick-prices` | GET | Fetch live market prices for an event `?url=` (read-only, no DB writes) |
@@ -874,7 +930,7 @@ If no speaker is selected or the speaker has no series/settlement data, `corpusM
 - URL input field for Kalshi event URLs or raw tickers
 - "Load Event" button fetches event data from Kalshi
 - **Speaker dropdown** — fetches speakers from `/api/corpus/speakers` and shows a dropdown to select which speaker's corpus data to use. This is the ONLY speaker selection on the home page (no free-text speaker input, no event type dropdown — agents determine those automatically).
-- **Corpus Category dropdown** — appears when a speaker is selected and that speaker has categories defined. Allows scoping the research run to a specific event type (e.g. only "Rally" events). Passed as `?corpusCategory=xxx` URL param to the research page and included in the trigger request. When selected, only events with that category contribute to the synthesizer's empirical mention rates.
+- **Corpus Category dropdown** — appears when a speaker is selected and that speaker has categories defined. Multi-select checkbox dropdown with an explicit **"All" checkbox** at the top (uses `__all__` sentinel value, separated from real categories by a divider). Allows scoping the research run to specific event types (e.g. only "Rally" events). The "All" checkbox controls whether the full unfiltered corpus (`corpusMentionRatesAll`) is passed to agents — it is NOT automatically included. Passed as `?corpusCategories=Sports,__all__` URL param to the research page and included in the trigger request. Button label shows: "No corpus" (nothing selected), "All" (only __all__), "Sports + All" (both real categories and All), or just "Sports" (category without All). When specific categories are selected, only events matching those categories contribute to the synthesizer's filtered mention rates.
 - **Model preset dropdown** — allows selecting which Claude model configuration to use for research: "Opus (Full) — highest quality", "Hybrid — Opus synthesizer, Sonnet/Haiku agents", "Sonnet (All) — good balance" (default), "Haiku (All) — cheapest". Stored in `modelPreset` state, passed as a URL query param (`?modelPreset=xxx`) when navigating to the research page.
 - Displays event details: title, ticker, word count
 - Shows grid of all word contracts with current YES prices
@@ -893,20 +949,30 @@ Reads `modelPreset` from URL query params (e.g., `/research/abc123?modelPreset=h
 - `RunHistory` — Expandable research run history with model preset tags (purple badges showing which model was used for each run)
 
 **Research tab** (designed for the trader's pre-event workflow):
+
+0. `RecentRecordings` — Clickable video cards linking to the 3 most recent recordings of similar events. Each card shows platform icon (▶ for YouTube, 📺 for C-SPAN, 🔗 for others), title, date, platform badge, duration, and description. Opens in new tab. Returns null if no recordings data. The agent's selection rationale and search queries are viewable in the `AgentOutputAccordion` under "Recent Recordings Agent". Data from `RecentRecordingsResult` in `research_runs.recent_recordings_result`.
+
 1. `EventContext` — Structured event context surfaced from agent results:
    - **Event Structure section**: Format (scripted/unscripted/mixed), estimated duration + range, Q&A (yes/no), live (yes/no), agent explanation of format and duration effects, trading weight footer (Historical weight %, Current context weight %, Word count expectation). Data from `EventFormatResult`.
    - **Event Analysis section**: Breaking news alert banner (if any), Agenda & Purpose with advance sources, Exogenous Events sorted by relevance (HIGH/MEDIUM/LOW) with speaker framing, Recent Speaker Statements with dates and context, Likely Topics sorted by likelihood (very_likely → unlikely) with evidence strings and related market words. Data from `AgendaResult` and `NewsCycleResult`.
    - Shows placeholder when no research has been run yet.
 
 2. `WordTable` — Corpus-integrated word analysis (replaces the old WordAnalysisTable):
+   - **Title with count** — "Word Analysis (N)" where N is the number of currently visible rows, updates dynamically with filtering.
+   - **Refresh Markets button** — pulls in newly added Kalshi strikes from the event without re-running research. Calls `POST /api/events/refresh-markets`, upserts new active/open words. Unscored words appear in the table with corpus data if available.
    - **Manual speaker selector** in the header — dropdown of all speakers from the corpus system. User selects which speaker's historical data to cross-reference against.
+   - **Category filter dropdown with checkboxes** — appears next to the speaker dropdown when the speaker has categories. Multi-select via checkboxes in a dropdown menu. Two modes:
+     - **"This event" (default)**: No categories selected. Shows all event strikes with full corpus data (no category filter). No rows hidden.
+     - **Specific categories (e.g. "Sports")**: Shows only event strikes that exist as words in that category's corpus. Strikes not tracked in the selected category's corpus are hidden. Even words with 0% mention rate in the category still show. Multiple categories can be selected simultaneously.
+     - Dropdown shows category name when one selected, "N selected" for multiple, "This event" for none. "Reset to this event" clears all selections.
    - **Historical rates from corpus only** — mention rates come exclusively from Kalshi settled market data (ground truth via `MentionHistoryRow`), NOT from the agent's web-scraped transcripts. This provides 100+ event sample sizes instead of ~9 from web scraping.
    - **Columns**: Word, Market Price (live via WebSocket), Historical Rate (color-coded badge: green ≥60%, yellow ≥30%, red <30%), Edge (historical rate - market price), Sample (yes/total)
    - **Expandable rows** — click any word to see event-by-event results (event title, ticker, date, MENTIONED/NOT MENTIONED badge) from the corpus
    - **Sortable** by all columns. Default sort: Edge descending.
-   - Data flow: `wordScores` (from research run) provide the word list + market tickers → `livePrices` (from WebSocket) update market prices → `mentionData` (from `/api/corpus/mention-history`) provides historical rates matched by normalized word name
+   - **Merges scored + unscored words** — rows come from both `wordScores` (research run results) and `allWords` (all DB words for the event, including newly added strikes). Unscored words show market prices and corpus data but no agent probabilities.
+   - Data flow: `wordScores` (from research run) + `allWords` (from DB) provide the word list + market tickers → `livePrices` (from WebSocket) update market prices → `mentionData` (from `/api/corpus/mention-history`) provides historical rates matched by normalized word name
 
-3. `AgentOutputAccordion` — Expandable raw agent outputs for debugging
+3. `AgentOutputAccordion` — Expandable raw agent outputs for debugging. 8 panels: Historical Transcript, Agenda/Preview, News Cycle, Event Format, Market Analysis, Recent Recordings, Word Clustering, Synthesizer.
 
 **Sources tab**: `SourcesTab` — aggregates every source used across all research agents, with type tags. Extracts sources from the latest completed run's `historical_result`, `agenda_result`, `news_cycle_result`, and `event_format_result`. Each source is tagged by type:
   - **Transcript** (blue) — from historical agent's `transcriptsFound[]`
@@ -976,7 +1042,7 @@ Strategic analytics page for long-term speaker data, completely separate from in
 
 ### Shared Types (`src/types/components.ts`)
 
-All component prop types defined here: Event, WordScore, Cluster, ResearchRun (includes `model_used` field), ResearchSummary, Trade, Word, EventResult, SortKey, TabId (`"research" | "sources" | "tradelog"`), PriceData.
+All component prop types defined here: Event, WordScore, Cluster, ResearchRun (includes `model_used` and `recent_recordings_result` fields), ResearchSummary (includes `recentRecordings` field), Trade, Word, EventResult, SortKey, TabId (`"research" | "sources" | "tradelog"`), PriceData.
 
 Also exports `MODEL_PRESET_LABELS: Record<string, string>` — maps preset keys to display labels: `{ opus: "Opus (Full)", hybrid: "Hybrid", sonnet: "Sonnet (All)", haiku: "Haiku (All)" }`. Used by `RunHistory` to display model tags and can be reused anywhere preset labels are needed.
 
@@ -1022,12 +1088,15 @@ TypeScript interfaces for all DB rows: `DbSpeaker`, `DbSeries`, `DbEvent`, `DbWo
 - Shows a "Run research to see event context" placeholder when all three props are null
 
 **`WordTable.tsx`** (new):
-- Props: `{ wordScores: WordScore[]; livePrices: Record<string, PriceData>; mentionData: MentionHistoryRow[]; mentionLoading: boolean; speakers: Array<{ id: string; name: string }>; selectedSpeakerId: string; onSpeakerChange: (speakerId: string) => void; categories?: string[]; selectedCategory?: string; onCategoryChange?: (category: string) => void }`
+- Props: `{ wordScores: WordScore[]; livePrices: Record<string, PriceData>; mentionData: MentionHistoryRow[]; mentionLoading: boolean; speakers: Array<{ id: string; name: string }>; selectedSpeakerId: string; onSpeakerChange: (speakerId: string) => void; categories?: string[]; selectedCategories?: string[]; onCategoriesChange?: (categories: string[]) => void; allWords?: Array<{ id, word, kalshi_market_ticker }>; onRefreshMarkets?: () => Promise<void>; refreshing?: boolean }`
+- Title shows "Word Analysis (N)" with dynamic count of visible rows
+- **Refresh Markets button** — calls `onRefreshMarkets` to pull in newly added Kalshi strikes without re-running research
 - Builds a `mentionRateMap` (word name → rate + events) from corpus `MentionHistoryRow[]`
-- Merges word scores (for the word list + market tickers), live prices (for current market price), and corpus data (for historical rate, edge, sample, and per-event detail)
+- **Merges scored + unscored words**: rows from `wordScores` (research results) and `allWords` (all DB words for event, deduplicated by ticker). Unscored words get prices and corpus data but no agent probabilities.
+- **Category filtering**: When `selectedCategories` is empty ("This event" mode), all rows show with full corpus data. When specific categories are selected, rows are filtered to only words that exist in the corpus (`mentionData` word list). Uses `corpusWords` Set built from `mentionData` for O(1) lookup.
+- **Dropdown with checkboxes**: Category selector is a dropdown menu with checkbox inputs for each category. Shows "This event" (default), category name (1 selected), or "N selected" (multiple). "Reset to this event" clears all.
 - Manages its own expand/collapse state for per-event detail rows
 - Shows "Select a speaker" prompt when no speaker is selected
-- **Category dropdown** next to the speaker dropdown — appears when a speaker is selected and has categories defined. Filters mention data to only include events with the selected category.
 - **Speaker selection persists**: `onSpeakerChange` callback saves the selection to the event record via `PATCH /api/events/speaker`, so it survives page reloads and is available to the analytics API
 
 **`EventHeader.tsx`** (updated):
@@ -1070,6 +1139,7 @@ The Sources tab (`SourcesTab.tsx`) on the research dashboard shows every source 
 | News Cycle | `news_cycle_result.recentSpeakerStatements[]` | `statement` (rose) |
 | Event Format | `event_format_result.comparableEvents[]` | `event` (purple) |
 | Market Analysis | _(none — pure price analysis, no web search)_ | — |
+| Recent Recordings | `recent_recordings_result.recordings[]` | _(displayed in dedicated RecentRecordings component, not in Sources tab)_ |
 
 The `extractSources()` function handles all extraction logic, normalizing different agent output shapes into a flat `ResearchSource[]` array.
 
@@ -1128,7 +1198,7 @@ npm run build
 
 **First-time setup:**
 1. Create a Supabase project
-2. Run all seven migrations (001-007) in order
+2. Run all eight migrations (001-008) in order
 3. Get a Kalshi API key and RSA private key
 4. Get an Anthropic API key with access to Claude Opus 4.6, Sonnet 4.5, and/or Haiku 4.5
 5. Fill in `.env.local` with all credentials
@@ -1206,7 +1276,7 @@ The research pipeline's synthesizer step can take 60-120+ seconds (32K token out
 ## Two-Layer Research Model
 
 ### Baseline Layer (Comprehensive)
-Run days before the event. Runs ALL 7 agents: historical frequencies, agenda, news cycle, event format, market analysis, clustering, and synthesis. The baseline should always be as comprehensive as possible.
+Run days before the event. Runs ALL 8 agents: historical frequencies, agenda, news cycle, event format, market analysis, recent recordings, clustering, and synthesis. The baseline should always be as comprehensive as possible.
 
 ### Current Layer (Refresh)
 Run hours before the event. Re-runs all agents with the latest data. Reuses baseline results as context (passed via `existingResearch` to the orchestrator). The purpose is to catch any material changes since the baseline was run.
@@ -1245,30 +1315,41 @@ The Kalshi Markets tab has a **side-by-side layout**: "Add Kalshi Series" on the
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/corpus/categories?speakerId=...` | Returns `{ categories: string[] }` — distinct category values from all events in the speaker's series, sorted alphabetically |
+| GET | `/api/corpus/categories?speakerId=...` | Returns `{ categories: { name: string, count: number }[] }` — distinct category values from all events in the speaker's series, with event counts, sorted alphabetically |
 | PATCH | `/api/corpus/categories` | Assign category to events. Body: `{ eventIds: string[], category: string \| null }`. Used by the event row dropdown. |
 | PUT | `/api/corpus/categories` | Global rename. Body: `{ speakerId, oldName, newName }`. Finds all events in the speaker's series with `category = oldName`, updates to `newName.trim()`. Returns `{ ok: true, updated: number }`. |
 | DELETE | `/api/corpus/categories?speakerId=...&name=...` | Global delete. Finds all events in the speaker's series with `category = name`, sets `category = null`. Returns `{ ok: true, cleared: number }`. |
 
 ### Category Filtering in Mention History
 
-The mention history API (`GET /api/corpus/mention-history`) accepts an optional `?category=` query parameter. When provided, the aggregation loop skips any event where `events.category !== category`. This means:
+The mention history API (`GET /api/corpus/mention-history`) accepts an optional `?category=` query parameter supporting comma-separated multiple categories (e.g. `?category=Sports,Rally`). When provided, the aggregation loop builds a `Set` of category names and skips any event where `events.category` is not in the set. This means:
 - Events with `category = null` (uncategorized) are excluded when a category filter is active
-- Only events explicitly assigned to the selected category contribute to mention rates
+- Only events explicitly assigned to one of the selected categories contribute to mention rates
 - The `totalSettledEvents` count also reflects only the filtered events
 
-The corpus page shows a category filter dropdown on the Mention History tab when the speaker has categories defined.
+The corpus page shows a single-select category filter dropdown on the Mention History tab when the speaker has categories defined.
 
 ### Category Filtering in Research Pipeline
 
-The research trigger API (`POST /api/research/trigger`) accepts an optional `corpusCategory` in the request body. When provided:
-1. The trigger API filters corpus `event_results` by checking `events.category === corpusCategory` before building the `corpusMentionRates` map
-2. The `corpusCategory` is stored on `research_runs.corpus_category` for tracking which category scope was used
-3. The synthesizer receives only mention rates from events matching that category
+The research trigger API (`POST /api/research/trigger`) accepts both `corpusCategories` (string array, preferred) and `corpusCategory` (string, backwards-compatible) in the request body. `corpusCategories` takes precedence. The array may contain the special `__all__` sentinel value. When provided:
+1. The trigger API extracts `__all__` from the categories array: `includeAllCorpus = rawCategories.includes("__all__")`, `effectiveCategories = rawCategories.filter(c => c !== "__all__")`. The `__all__` value is never used as an actual category filter.
+2. Builds corpus datasets: `corpusMentionRates` (filtered by `effectiveCategories` if any, or the full dataset if only "All" is ticked) and `corpusMentionRatesAll` (**only populated when `includeAllCorpus` is true** — i.e., the user explicitly ticked "All"). Both include full per-event detail (event title, date, ticker, category, wasMentioned). Also computes `corpusTotalEvents` (distinct event count across all categories).
+3. The effective categories (without `__all__`) are stored as comma-separated string on `research_runs.corpus_category` for tracking which category scope was used.
+4. The synthesizer receives the datasets plus the category names and total event count, enabling it to compare filtered vs unfiltered rates when both are present.
 
 The home page and research page both support category selection:
-- **Home page**: Category dropdown appears when a speaker is selected and has categories. Passed as `?corpusCategory=xxx` URL param.
-- **Research page**: Reads `corpusCategory` from URL params, fetches categories when speaker changes, passes to trigger API and mention-history API.
+- **Home page**: Multi-select category dropdown with checkboxes appears when a speaker is selected and has categories. Has an explicit **"All" checkbox** at the top (separated by a divider from real categories) that sends `__all__` sentinel. Passed as `?corpusCategories=Sports,__all__` URL param. Controls whether `corpusMentionRatesAll` is populated — it is NOT automatically included.
+- **Research page**: Reads `corpusCategories` from URL params (comma-separated, initial value — strips `__all__` for display), also supports legacy `corpusCategory` param. Fetches categories when speaker changes. The WordTable component has a multi-select dropdown with checkboxes for category filtering (display filter only — does NOT have the "All" checkbox, which is home-page-only). Multiple categories can be combined (e.g. "Sports" + "Rally"). The research trigger sends `corpusCategories` (array) to the API. The mention-history fetch sends comma-separated categories (with `__all__` stripped).
+
+**Important distinction**: The home page category dropdown controls what corpus data is passed to agents at research trigger time. The WordTable category dropdown on the research page is a CLIENT-SIDE display filter only — it controls which words are shown in the table. These are completely independent systems.
+
+### Category Filtering in WordTable (Research Dashboard)
+
+The WordTable on the research dashboard has a **two-mode** category filter:
+
+1. **"This event" (default)** — `selectedCategories` is empty. The mention-history API is called without a category filter (full corpus). All event strikes are shown. Words with no corpus match show "No data".
+
+2. **Specific categories selected** — `selectedCategories` contains one or more category names. The mention-history API is called with those categories as a comma-separated `?category=` param. Rows are filtered to only show words that exist in the returned corpus data (built from `mentionData` word list). Event strikes not tracked in the selected categories' corpus are hidden. Words with a 0% mention rate in the category still show (they exist in the corpus, they just were never mentioned).
 
 ### Import Behavior
 
@@ -1279,16 +1360,17 @@ New events imported via "Refresh" come in with `category = null` (uncategorized)
 ## Current Status & Known Issues
 
 ### What's Built and Working
-- Full 7-agent research pipeline with streaming progress (all agents run on both layers)
+- Full 8-agent research pipeline with streaming progress (all agents run on both layers)
 - **Hybrid model support** — configurable model presets (Opus, Hybrid, Sonnet, Haiku) with per-agent model routing. Default: Sonnet (All). Model preset dropdown on home page, flows through URL params → research page → trigger API → orchestrator → agents → claude-client.
 - **Model tags on research runs** — purple badge in RunHistory showing which preset was used (e.g., "Sonnet (All)", "Hybrid"). Uses `MODEL_PRESET_LABELS` from `components.ts`.
 - **Retry with exponential backoff** — Claude API calls automatically retry on transient errors (429, 529, 500/502/503, connection errors). 4 retries with 3s base delay. Detailed error logging.
-- **Corpus data injection** — when a speaker is selected, empirical mention rates from settled Kalshi markets are fetched and passed to the synthesizer as ground-truth base rates. Weight reallocation: 70% corpus / 30% generic base rate.
-- **Home page speaker selection** — corpus speaker dropdown on home page (no free-text speaker input or event type dropdown). Speaker persists to event record and flows through research trigger to synthesizer.
+- **Corpus data injection with category awareness** — when a speaker is selected, empirical mention rates from settled Kalshi markets are fetched and passed to the synthesizer as ground-truth base rates. Weight reallocation: 70% corpus / 30% generic base rate. When categories are selected, the synthesizer receives **both** the filtered corpus (matching categories only) and the full corpus (all event types), with full per-event detail (title, date, ticker, category, mentioned yes/no). This enables the synthesizer to compare rates across event formats, spot recency trends, and flag divergences.
+- **Home page speaker selection + multi-select categories with "All" control** — corpus speaker dropdown and multi-select category dropdown (checkbox style, same pattern as WordTable) on home page. Speaker persists to event record and flows through research trigger to synthesizer. Categories passed as comma-separated `corpusCategories` URL param. Explicit "All" checkbox (`__all__` sentinel) controls whether the full unfiltered corpus is passed to agents — not automatic.
 - Tabbed research dashboard (Research | Sources | Trade Log) with extracted components
 - **EventHeader** — includes corpus speaker dropdown for changing speaker selection before/between research runs
 - **EventContext** — structured event context (format, duration, Q&A, agenda, exogenous events, likely topics, recent statements) surfaced from agent results
-- **WordTable** — corpus-integrated word analysis with manual speaker selection, historical rates from Kalshi settled market data (ground truth, 100+ event samples), expandable per-event detail, live WebSocket prices
+- **WordTable** — corpus-integrated word analysis with manual speaker selection, historical rates from Kalshi settled market data (ground truth, 100+ event samples), expandable per-event detail, live WebSocket prices, multi-select category filtering with checkbox dropdown, "Refresh Markets" button for pulling in new Kalshi strikes, word count in title, merged scored + unscored rows. **Important**: The WordTable category dropdown is a CLIENT-SIDE display filter only — it controls which words are shown in the table. The home page category dropdown controls what corpus data is passed to agents at research trigger time. These are completely independent.
+- **Recent Recordings** — clickable video cards linking to 3 most recent recordings of similar events, with agent selection rationale in the AgentOutputAccordion
 - **Sources tab** — aggregated sources from all agents with type tags (transcript, news, agenda, statement, event), clickable links to originals
 - **Home page** — only shows events with research runs (corpus-imported events excluded)
 - Live WebSocket price streaming via SSE proxy
@@ -1300,7 +1382,7 @@ New events imported via "Refresh" come in with `category = null` (uncategorized)
   - Mention History: cross-event word mention rates with searchable, sortable, expandable per-event detail (827+ data points across 116 events). Word search filter, reset sort button. Data from Kalshi settled markets (ground truth).
   - Kalshi Markets: series management with searchable Kalshi API dropdown, per-series import/refresh, expandable events with word result tables and category dropdowns. **Category management panel** — create/rename/delete categories alongside "Add Kalshi Series". Per-event removal with excluded_tickers tracking (removed events won't be re-imported on refresh). Event title filter for quickly finding/removing non-relevant events. Event titles hyperlinked to original Kalshi market pages for speaker verification. Supports multi-speaker series (e.g. KXCONGRESSMENTION) — import full series under a speaker, remove non-relevant events, refresh safely.
   - Quick Analysis: paste URL → live price vs historical rate comparison table with WebSocket updates, saved search list (localStorage), expandable per-event detail, edge detection, summary cards
-- **Corpus categories** — create, rename (globally), delete (globally) categories in the Kalshi Markets tab. Assign events to categories via dropdown. Filter mention history and research pipeline by category.
+- **Corpus categories** — create, rename (globally), delete (globally) categories in the Kalshi Markets tab with event counts. Assign events to categories via dropdown. Filter mention history and research pipeline by category. Multi-select category support on research page WordTable (single-select on corpus page Mention History tab).
 - Speaker → Series → Events data model (no fragile inference)
 - Historical data import from Kalshi API with pagination and deduplication
 
@@ -1329,7 +1411,7 @@ New events imported via "Refresh" come in with `category = null` (uncategorized)
 - Streaming required for long-running web search operations
 - Three-tier JSON parsing: code fences → raw JSON → balanced-brace parser
 - `pause_turn` max 5 continuations
-- Synthesizer uses 32K tokens — monitor for truncation on 50+ word events
+- Synthesizer uses 32K output tokens — monitor for truncation on 50+ word events. **Note (Phase 17)**: Input context is now significantly larger with full per-event detail for both filtered and unfiltered corpus datasets. For 25 words × 114 events × 2 datasets, the corpus section alone can be 50-80K tokens. Within Opus/Sonnet's 200K context window but worth monitoring.
 - **Retry logging**: All API failures logged as `[claude-client] API call failed (model=..., attempt X/Y, retryable=...): ...`. Look for these in server console to debug transient errors.
 - **Model-specific issues**: Haiku 4.5 has been observed to fail with `overloaded_error` (529) when using web search. Check `[orchestrator] Phase 1 agent failed:` logs for which agents specifically failed.
 - **Default model**: Sonnet 4.5 (`claude-sonnet-4-5-20250929`). Changed from Opus 4.0 in Phase 12.
@@ -1344,7 +1426,7 @@ New events imported via "Refresh" come in with `category = null` (uncategorized)
 - Full OpenAPI spec at `docs/kalshi-openapi.yaml`
 
 ### Supabase
-- All 7 migrations applied (001-007). **Default 1000-row limit** — always paginate large queries.
+- All 8 migrations applied (001-008). **Default 1000-row limit** — always paginate large queries.
 - Service role key bypasses RLS. Anon key respects RLS.
 - Management API at `POST https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query` for running SQL directly.
 
@@ -1365,14 +1447,14 @@ Per-model pricing (cost per million tokens):
 | Sonnet 4.5 (`claude-sonnet-4-5-20250929`) | $3.00 | $15.00 |
 | Haiku 4.5 (`claude-haiku-4-5-20251001`) | $1.00 | $5.00 |
 
-Estimated cost per research run (7 agents, one event with ~28 words):
+Estimated cost per research run (8 agents, one event with ~28 words):
 
-| Preset | Phase 1 (5 agents) | Phase 2 (clustering) | Phase 3 (synthesis) | **Total per run** |
+| Preset | Phase 1 (6 agents) | Phase 2 (clustering) | Phase 3 (synthesis) | **Total per run** |
 |--------|-------------------|---------------------|--------------------|--------------------|
-| **Opus** (Full) | ~$0.50 - $1.50 | ~$0.10 - $0.20 | ~$0.20 - $0.50 | **~$0.80 - $2.20** |
-| **Sonnet** (All) | ~$0.30 - $0.90 | ~$0.06 - $0.12 | ~$0.12 - $0.30 | **~$0.48 - $1.32** |
-| **Hybrid** | ~$0.25 - $0.75 | ~$0.02 - $0.04 | ~$0.20 - $0.50 | **~$0.47 - $1.29** |
-| **Haiku** (All) | ~$0.10 - $0.30 | ~$0.02 - $0.04 | ~$0.04 - $0.10 | **~$0.16 - $0.44** |
+| **Opus** (Full) | ~$0.55 - $1.60 | ~$0.10 - $0.20 | ~$0.20 - $0.50 | **~$0.85 - $2.30** |
+| **Sonnet** (All) | ~$0.33 - $0.95 | ~$0.06 - $0.12 | ~$0.12 - $0.30 | **~$0.51 - $1.37** |
+| **Hybrid** | ~$0.26 - $0.77 | ~$0.02 - $0.04 | ~$0.20 - $0.50 | **~$0.48 - $1.31** |
+| **Haiku** (All) | ~$0.11 - $0.32 | ~$0.02 - $0.04 | ~$0.04 - $0.10 | **~$0.17 - $0.46** |
 
 Both layers: double the per-run cost. Failed runs still cost money. The default preset is Sonnet (All).
 
@@ -1458,10 +1540,14 @@ Both layers: double the per-run cost. Failed runs still cost money. The default 
 52. **WordTable component** — New `src/components/research/WordTable.tsx` replacing `WordAnalysisTable` on the Research tab. Matches the QuickAnalysis-style layout from the corpus page. Key differences from the old table:
    - Historical rates come exclusively from corpus settled market data (ground truth, 100+ event samples), NOT from the agent's web-scraped transcripts (~9 transcripts).
    - Manual speaker selector dropdown at the top — user selects which speaker's corpus data to cross-reference.
+   - Multi-select category dropdown with checkboxes — filter corpus data by one or more categories. "This event" (default) shows all strikes with full corpus; specific categories show only words tracked in those categories' corpus.
+   - "Refresh Markets" button to pull in newly added Kalshi strikes without re-running research.
+   - "Word Analysis (N)" title with dynamic count of visible rows.
+   - Merges scored + unscored rows from both research results and DB words.
    - Columns: Word, Market Price (live via WebSocket), Historical Rate (color-coded badge), Edge (rate - price), Sample (yes/total).
    - Expandable rows showing per-event detail from corpus `MentionEventDetail[]`.
    - No cluster filters, no agent confidence columns, no summary cards.
-   - Props include: `wordScores`, `livePrices`, `mentionData: MentionHistoryRow[]`, `speakers`, `selectedSpeakerId`, `onSpeakerChange`.
+   - Props include: `wordScores`, `livePrices`, `mentionData: MentionHistoryRow[]`, `speakers`, `selectedSpeakerId`, `onSpeakerChange`, `categories`, `selectedCategories`, `onCategoriesChange`, `allWords`, `onRefreshMarkets`, `refreshing`.
 
 53. **Research page corpus integration** — `src/app/research/[eventId]/page.tsx` now fetches corpus data:
    - Added state: `speakers`, `selectedSpeakerId`, `mentionData`, `mentionLoading`.
@@ -1469,7 +1555,7 @@ Both layers: double the per-run cost. Failed runs still cost money. The default 
    - Fetches mention history from `GET /api/corpus/mention-history?speakerId=X` when speaker changes.
    - **Speaker selection persists to DB**: When the user selects a speaker in the WordTable dropdown, it calls `PATCH /api/events/speaker` to save `speaker_id` on the event. On page load, `selectedSpeakerId` is restored from the event's `speaker_id` field, so the selection survives page reloads.
    - Speaker selection is manual (never automatic) — the user explicitly chooses which speaker's historical data to use. The `speaker_id` on the event record is the ONLY way analytics knows which corpus data to pull.
-   - Research tab render order: `EventContext` → `WordTable` → `AgentOutputAccordion`.
+   - Research tab render order: `RecentRecordings` → `EventContext` → `WordTable` → `AgentOutputAccordion`.
 
 54. **News Cycle agent on both layers** — Removed the `if (input.layer === "current")` guard in `src/agents/orchestrator.ts`. The News Cycle agent now runs on both baseline and current layers. Rationale: baseline should always be as comprehensive as possible; the current layer is a refresh, not the only place for news analysis.
 
@@ -1661,3 +1747,132 @@ Both layers: double the per-run cost. Failed runs still cost money. The default 
 110. **Research page category integration** — `src/app/research/[eventId]/page.tsx` reads `corpusCategory` from URL search params, fetches categories for the selected speaker, manages `categories` and `selectedCategory` state. Passes category to both the mention-history fetch and the research trigger API. The `WordTable` component receives `categories`, `selectedCategory`, and `onCategoryChange` as optional props and shows a category dropdown next to the speaker selector.
 
 111. **Series events API: category field** — `src/app/api/corpus/series/events/route.ts` updated to include `category` in the events select and response. Each event in the response now has `category: string | null`.
+
+### Phase 16: Multi-Category Support, Refresh Markets & WordTable Enhancements (Mar 2026)
+
+112. **Categories API: event counts** — `GET /api/corpus/categories` now returns `{ name: string, count: number }[]` instead of `string[]`. Each category includes the count of events assigned to it. The corpus page and research page both extract `.name` from the new format. The KalshiMarketsTab shows event counts in brackets next to each category name (e.g. "Sports (12)").
+
+113. **Multi-category mention history** — `src/app/api/corpus/mention-history/route.ts` updated from single `?category=` filter to comma-separated multi-category support. Builds a `Set` from the comma-split category param and checks `categorySet.has(eventData.category)` instead of strict equality. This allows combining multiple categories (e.g. `?category=Sports,Rally`) to get aggregate mention rates across event types.
+
+114. **Multi-category research trigger** — `src/app/api/research/trigger/route.ts` now accepts `corpusCategories` (string array) alongside the existing `corpusCategory` (string, backwards-compatible). `corpusCategories` takes precedence. When categories are provided, filters corpus events using `effectiveCategories.includes(row.events.category)`. Stores comma-separated categories on `research_runs.corpus_category`.
+
+115. **Research page multi-category state** — `src/app/research/[eventId]/page.tsx` changed from `corpusCategory` (string) to `corpusCategories` (string array). The mention-history fetch sends comma-separated categories. The research trigger sends `corpusCategories` array. WebSocket `marketTickers` now includes tickers from both `wordScores` and `words` (to support live prices on unscored words).
+
+116. **Refresh Markets API** — New `POST /api/events/refresh-markets` endpoint (`src/app/api/events/refresh-markets/route.ts`). Accepts `{ eventId }`. Looks up the event's Kalshi ticker, fetches current markets from the Kalshi API, and upserts any new active/open words not already in the DB. Returns `{ newWords, totalWords, words }`. Enables pulling in newly added Kalshi strikes without re-running research.
+
+117. **WordTable: Refresh Markets button** — Added "Refresh Markets" button next to the "Word Analysis" title. Calls the refresh-markets API and reloads the page data. Shows a spinner while refreshing. Newly added words appear as unscored rows with market prices and corpus data (if available).
+
+118. **WordTable: merged scored + unscored rows** — The `rows` memo now merges `wordScores` (from research run) with `allWords` (all DB words for the event). Unscored words (from `allWords` but not in `wordScores`) are deduplicated by market ticker and appear with live prices and corpus data but no agent probabilities. This ensures newly added strikes from "Refresh Markets" appear in the table immediately.
+
+119. **WordTable: multi-select category dropdown with checkboxes** — Replaced the initial pill/chip toggle UI with a proper dropdown menu containing checkbox inputs for each category. Two modes:
+    - **"This event" (default)**: No categories selected. Full corpus data, all event strikes shown, no filtering.
+    - **Specific categories**: Only shows event strikes that exist as words in the selected categories' corpus. Filtering uses a `corpusWords` Set built from `mentionData` for O(1) lookup. Words with 0% rate still show (they exist in the corpus).
+    - Dropdown label: "This event" → "Sports" (1 selected) → "2 selected" (multiple). "Reset to this event" clears all.
+
+120. **WordTable: word count in title** — Title changed from "Word Analysis" to "Word Analysis (N)" where N is the count of currently visible (filtered + sorted) rows. Updates dynamically when switching between "This event" and category filters.
+
+121. **KalshiMarketsTab: category event counts** — Category names in the Kalshi Markets tab now show event counts in brackets (e.g. "Sports (12)"). Categories state lifted from local to shared between corpus tabs. The categories prop changed from `string[]` to `CategoryWithCount[]` (`{ name: string, count: number }`). An `onCategoriesChanged` callback notifies the parent when assignments change so counts refresh.
+
+122. **Corpus page: always-visible category dropdown** — The category dropdown on the Mention History tab is now always visible when a speaker is selected (removed the `categories.length > 0` condition). This allows seeing the dropdown even before any categories have events assigned, since locally created categories appear immediately.
+
+### Phase 17: Corpus-Category-Aware Synthesizer + Agent Prompt Audit (Mar 2026)
+
+123. **Home page category API bug fix** — `src/app/page.tsx` was setting categories state directly from the API response (`data.categories`), but the `GET /api/corpus/categories` endpoint returns `{ name: string, count: number }[]` objects, not strings. When React tried to render `{cat}` in `<option>` elements, it threw "Objects are not valid as a React child (found: object with keys {name, count})". Fixed by normalizing the API response with `.map(c => typeof c === "string" ? c : c.name)` — same pattern already used on the research page.
+
+124. **`CorpusEventDetail` type** — New interface in `src/types/research.ts`: `{ eventTitle: string; eventDate: string | null; eventTicker: string; wasMentioned: boolean; category: string | null }`. Represents a single event's result for a word in the corpus.
+
+125. **`CorpusMentionRate` enriched with per-event detail** — The existing `CorpusMentionRate` interface in `src/types/research.ts` now includes `events: CorpusEventDetail[]` — the full per-event breakdown showing exactly which events mentioned (or didn't mention) each word, with event title, date, ticker, and category. Previously this data was fetched for the frontend `MentionHistoryTable` but discarded in the research pipeline — now it flows through to the synthesizer.
+
+126. **Dual corpus datasets in OrchestratorInput** — `src/types/research.ts` `OrchestratorInput` extended with three new fields:
+    - `corpusMentionRatesAll?: Record<string, CorpusMentionRate>` — unfiltered corpus data across all event types for the speaker
+    - `corpusCategories?: string[]` — which categories were selected for filtering
+    - `corpusTotalEvents?: number` — count of distinct events across all categories
+    - The existing `corpusMentionRates` field now contains category-filtered data (when categories selected) or identical data to `corpusMentionRatesAll` (when no categories selected)
+
+127. **Trigger API: dual corpus dataset building** — `src/app/api/research/trigger/route.ts` rewritten corpus fetching logic:
+    - Expanded Supabase query to fetch `events.title`, `events.kalshi_event_ticker`, `events.event_date`, `events.category` (previously only fetched `series_id` and `category`)
+    - Introduced `buildCorpusDataset()` helper function that builds a `Record<string, CorpusMentionRate>` with full per-event detail from a set of query results
+    - Builds two datasets from the same query: `corpusMentionRatesAll` (all speaker events) and `corpusMentionRates` (filtered by selected categories, or same as all if no categories)
+    - Computes `corpusTotalEvents` as the count of distinct event tickers across all speaker events
+    - Passes all four fields (`corpusMentionRates`, `corpusMentionRatesAll`, `corpusCategories`, `corpusTotalEvents`) to the orchestrator input
+    - Pagination (1000-row chunks) preserved from previous implementation
+
+128. **Orchestrator corpus pass-through** — `src/agents/orchestrator.ts` updated to pass `corpusMentionRatesAll`, `corpusCategories`, and `corpusTotalEvents` through to the synthesizer call alongside the existing `corpusMentionRates`. No transformation — pure pass-through.
+
+129. **Synthesizer: corpus-category-aware prompt** — `src/agents/synthesizer.ts` major rewrite of corpus handling:
+    - `SynthesizerInput` extended with `corpusMentionRatesAll`, `corpusCategories`, `corpusTotalEvents`
+    - **System prompt**: When categories are selected, the prompt explains the two-dataset structure ("FILTERED CORPUS" and "FULL CORPUS"), instructs the model to use filtered rates as primary anchor, compare against full rates for divergences, check recency trends using per-event detail, and consider sample size (3 filtered events vs 50 overall). When no categories selected, explains that data mixes all event formats and directs the model to use per-event detail to reason about comparability.
+    - **Corpus data sections**: New `formatCorpusDataset()` helper formats each dataset with per-word rates + per-event breakdown. Each word shows: rate, sample fraction, then indented lines for each event (YES/NO — event title (date) [category]). Events sorted by date descending.
+    - When categories selected: two labeled sections (`=== CORPUS — FILTERED TO [Sports] (8 events) ===` and `=== CORPUS — ALL EVENT TYPES (114 total events) ===`)
+    - When no categories: single section (`=== CORPUS MENTION HISTORY — ALL EVENT TYPES (114 total events) ===`)
+    - Filtered section header dynamically computes event count from distinct event tickers in the filtered dataset
+
+130. **Agenda agent: speaker-agnostic prompt** — `src/agents/agenda.ts` removed hardcoded "Truth Social for Trump, X/Twitter for others" from the search instructions. Replaced with generic "The speaker's recent social media posts and public statements that hint at what they plan to discuss". This makes the agent work correctly for any speaker without platform-specific assumptions.
+
+131. **News-cycle agent: contextual lookback + speaker-agnostic** — `src/agents/news-cycle.ts` two changes:
+    - Removed hardcoded platform references. Changed "Top news stories in the last 72 hours" to "Top recent news stories... focus on the last 24 hours for imminent events, expand to 72+ hours for events further out". Changed "recent public statements, interviews, and social media posts" to add "across all platforms".
+    - Made the user message lookback window contextual: "Focus on the most recent news and statements — prioritize the last 24-72 hours, scaling the window based on how soon the event is" (previously fixed at "last 72 hours").
+
+132. **Home page: multi-select category dropdown** — `src/app/page.tsx` replaced the single `<select>` category dropdown with a multi-select checkbox dropdown matching the same pattern used in `WordTable.tsx`:
+    - State changed from `selectedCategory: string` to `selectedCategories: string[]` with `catDropdownOpen` boolean
+    - Dropdown button shows "All categories" (none selected), category name (1 selected), or "N selected" (multiple)
+    - Checkbox labels for each category, "Reset to all categories" button when selections active
+    - Fixed overlay pattern for closing dropdown on outside click
+    - Passes `corpusCategories=Sports,Rally` (comma-separated) as URL param instead of `corpusCategory=Sports`
+
+133. **Research page: multi-category URL param** — `src/app/research/[eventId]/page.tsx` updated to read `corpusCategories` (comma-separated) from URL search params, with backwards-compatible fallback to `corpusCategory` (singular). Splits the param on commas to initialize the `corpusCategories` state array.
+
+### Phase 18: Recent Recordings Agent + Corpus "All" Control (Mar 2026)
+
+134. **Recent Recordings agent** — New `src/agents/recent-recordings.ts`. Uses `callAgentForJson` with `enableWebSearch: true` and `maxTokens: 4000`. Takes `speaker`, `eventTitle`, `eventDate`, `eventType`, and optional `model` as input. Prompts Claude to search for the 3 most recent video recordings of events similar to the upcoming one, prioritizing YouTube and C-SPAN. Returns `RecentRecordingsResult` with `recordings[]` (title, date, url, platform, durationMinutes, description), `selectionRationale`, and `searchQueries[]`. The agent explains why each recording was selected and how watching them will help prepare for the upcoming event.
+
+135. **`RecentRecordingsResult` type** — New interface in `src/types/research.ts`. `AgentName` union type updated to include `"recent_recordings"` between `"market_analysis"` and `"clustering"`.
+
+136. **Migration 008: `recent_recordings_result`** — New `supabase/migrations/008_recent_recordings.sql` adds `recent_recordings_result JSONB` column to `research_runs` table. Applied to live Supabase database via Management API.
+
+137. **Orchestrator: recent recordings wiring** — `src/agents/orchestrator.ts` updated:
+    - Added import for `runRecentRecordingsAgent` and `RecentRecordingsResult`
+    - Added `recent_recordings` to all 4 model preset maps in `getAgentModels()`: Opus→OPUS, Hybrid→HAIKU, Sonnet→SONNET, Haiku→HAIKU
+    - Added agent to Phase 1 parallel array (6 agents now, was 5) — runs between market_analysis and news_cycle
+    - Added fallback result extraction: `const recentRecordingsResult = (agentResults.recent_recordings as RecentRecordingsResult) ?? { recordings: [], selectionRationale: "Recent recordings search failed", searchQueries: [] }`
+    - Added `recent_recordings_result: recentRecordingsResult` to Phase 1 DB save
+    - `totalAgents` in SSE "started" event updated from 6/7 to 7/8 (baseline/current)
+
+138. **`RecentRecordings.tsx` component** — New `src/components/research/RecentRecordings.tsx`. Displays 3 clickable video cards with:
+    - Platform icon (▶ for YouTube, 📺 for C-SPAN, 🔗 for others)
+    - Video title (clickable, opens in new tab, turns blue on hover)
+    - Date, platform badge, duration (if available)
+    - Description (2-line clamp)
+    - External link icon
+    - Returns null if no recordings data or empty recordings array
+
+139. **`AgentOutputAccordion.tsx` updated** — Added `{ key: "recentRecordings", label: "Recent Recordings Agent" }` to the `agentPanels` array between `marketAnalysis` and `clusters`. Now has 8 panels total. The agent's selection rationale and search queries are visible in this accordion panel.
+
+140. **Research page integration** — `src/app/research/[eventId]/page.tsx` updated:
+    - Added imports for `RecentRecordingsResult` and `RecentRecordings`
+    - Added derived value: `const recentRecordingsResult = (latestCompletedRun?.recent_recordings_result as RecentRecordingsResult) ?? null`
+    - Rendered `<RecentRecordings recordings={recentRecordingsResult} />` between EventContext and WordTable on the Research tab
+
+141. **API response updated** — `src/app/api/research/[eventId]/route.ts` added `recentRecordings: latestCompletedRun.recent_recordings_result` to the `researchSummary` object in the GET response.
+
+142. **`ResearchRun` type updated** — `src/types/components.ts` added `recent_recordings_result: unknown | null` to the `ResearchRun` interface. `ResearchSummary` interface updated to include `recentRecordings: unknown`.
+
+143. **Explicit "All" corpus checkbox** — `src/app/page.tsx` home page category dropdown updated:
+    - Added permanent "All" checkbox at the top of the dropdown, separated from real categories by a `<hr>` divider
+    - Uses `__all__` sentinel value in the `selectedCategories` state array
+    - The `__all__` sentinel controls whether `corpusMentionRatesAll` (full unfiltered corpus) is passed to agents — previously always included, now opt-in
+    - Button label logic: "No corpus" (nothing selected), "All" (only __all__), "Sports + All" (both), "Sports" (category only)
+    - Changed "Reset to all categories" text to "Clear all"
+
+144. **Trigger API `__all__` handling** — `src/app/api/research/trigger/route.ts` updated:
+    - Extracts `__all__` from `corpusCategories`: `const includeAllCorpus = rawCategories.includes("__all__")`, `const effectiveCategories = rawCategories.filter(c => c !== "__all__")`
+    - `corpusMentionRatesAll` only populated when `includeAllCorpus` is true (user explicitly ticked "All")
+    - `corpusMentionRates` uses category-filtered data when `effectiveCategories.length > 0`, or the full dataset when only "All" is ticked (no specific categories)
+    - `effectiveCategories` (without `__all__`) stored on `research_runs.corpus_category`
+
+145. **Research page `__all__` stripping** — `src/app/research/[eventId]/page.tsx` updated:
+    - `corpusCategories` state initialization strips `__all__` from URL params: `.filter((c) => c !== "__all__")`
+    - Mention-history API fetch strips `__all__` from categories: `const realCategories = corpusCategories.filter((c) => c !== "__all__")`
+    - This prevents `__all__` from leaking into the WordTable display filter or the mention-history API
+
+146. **Synthesizer crash fix** — `src/agents/synthesizer.ts` fixed a crash when using the Haiku preset: `input.historicalResult.transcriptsFound.length` → `input.historicalResult.transcriptsFound?.length ?? 0`. Haiku sometimes returns an unexpected shape where `transcriptsFound` is undefined, causing "Cannot read properties of undefined (reading 'length')".

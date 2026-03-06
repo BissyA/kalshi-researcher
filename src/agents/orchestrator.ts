@@ -4,6 +4,7 @@ import { runAgendaAgent } from "./agenda";
 import { runNewsCycleAgent } from "./news-cycle";
 import { runEventFormatAgent } from "./event-format";
 import { runMarketAnalysisAgent } from "./market-analysis";
+import { runRecentRecordingsAgent } from "./recent-recordings";
 import { runClusteringAgent } from "./clustering";
 import { runSynthesizer } from "./synthesizer";
 import {
@@ -16,6 +17,7 @@ import {
   NewsCycleResult,
   EventFormatResult,
   MarketAnalysisResult,
+  RecentRecordingsResult,
   ModelPreset,
 } from "@/types/research";
 
@@ -36,6 +38,7 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         news_cycle: OPUS,
         event_format: OPUS,
         market_analysis: OPUS,
+        recent_recordings: OPUS,
         clustering: OPUS,
         synthesizer: OPUS,
       };
@@ -46,6 +49,7 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         news_cycle: SONNET,
         event_format: HAIKU,
         market_analysis: SONNET,
+        recent_recordings: HAIKU,
         clustering: HAIKU,
         synthesizer: OPUS,
       };
@@ -56,6 +60,7 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         news_cycle: SONNET,
         event_format: SONNET,
         market_analysis: SONNET,
+        recent_recordings: SONNET,
         clustering: SONNET,
         synthesizer: SONNET,
       };
@@ -66,6 +71,7 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         news_cycle: HAIKU,
         event_format: HAIKU,
         market_analysis: HAIKU,
+        recent_recordings: HAIKU,
         clustering: HAIKU,
         synthesizer: HAIKU,
       };
@@ -192,6 +198,17 @@ export async function runResearchPipeline(
     ];
 
     agentPromises.push({
+      name: "recent_recordings",
+      promise: runRecentRecordingsAgent({
+        speaker: input.event.speaker,
+        eventTitle: input.event.title,
+        eventDate: input.event.eventDate,
+        eventType: input.event.eventType,
+        model: models.recent_recordings,
+      }),
+    });
+
+    agentPromises.push({
       name: "news_cycle",
       promise: runNewsCycleAgent({
         speaker: input.event.speaker,
@@ -259,6 +276,11 @@ export async function runResearchPipeline(
       correlatedPairs: [],
       overallMarketNotes: "Market analysis failed",
     };
+    const recentRecordingsResult = (agentResults.recent_recordings as RecentRecordingsResult) ?? {
+      recordings: [],
+      selectionRationale: "Recent recordings search failed",
+      searchQueries: [],
+    };
 
     // Save phase 1 results to DB (non-critical — don't crash pipeline on failure)
     try {
@@ -268,6 +290,7 @@ export async function runResearchPipeline(
         news_cycle_result: newsCycleResult,
         event_format_result: eventFormatResult,
         market_analysis_result: marketAnalysisResult,
+        recent_recordings_result: recentRecordingsResult,
       }).eq("id", runId);
     } catch (dbErr) {
       console.error("Failed to save phase 1 results:", dbErr);
@@ -346,6 +369,9 @@ export async function runResearchPipeline(
       marketAnalysisResult,
       clusterResult: clusteringResult.data,
       corpusMentionRates: input.corpusMentionRates,
+      corpusMentionRatesAll: input.corpusMentionRatesAll,
+      corpusCategories: input.corpusCategories,
+      corpusTotalEvents: input.corpusTotalEvents,
       model: models.synthesizer,
     });
 
@@ -360,7 +386,7 @@ export async function runResearchPipeline(
 
     // Save word clusters to DB (non-critical — don't crash pipeline)
     try {
-      for (const cluster of clusteringResult.data.clusters) {
+      for (const cluster of clusteringResult.data.clusters ?? []) {
         const { data: clusterRow } = await supabase
           .from("word_clusters")
           .insert({
@@ -387,8 +413,9 @@ export async function runResearchPipeline(
     }
 
     // Save word scores (non-critical — don't crash pipeline)
+    const wordScores = synthesisResult.data.wordScores ?? [];
     let savedScores = 0;
-    for (const score of synthesisResult.data.wordScores) {
+    for (const score of wordScores) {
       try {
         const { data: wordRow } = await supabase
           .from("words")
@@ -419,7 +446,7 @@ export async function runResearchPipeline(
         console.error(`Failed to save score for "${score.word}":`, dbErr);
       }
     }
-    console.log(`Saved ${savedScores}/${synthesisResult.data.wordScores.length} word scores`);
+    console.log(`Saved ${savedScores}/${wordScores.length} word scores`);
 
     // Mark research run as completed
     await supabase.from("research_runs").update({
@@ -447,8 +474,8 @@ export async function runResearchPipeline(
     });
 
     return {
-      wordScores: synthesisResult.data.wordScores,
-      clusters: clusteringResult.data.clusters,
+      wordScores: wordScores,
+      clusters: clusteringResult.data.clusters ?? [],
       eventFormat: {
         estimatedDurationMinutes: eventFormatResult.estimatedDurationMinutes,
         format: eventFormatResult.format,

@@ -20,9 +20,11 @@ import type {
   AgendaResult,
   NewsCycleResult,
   EventFormatResult,
+  RecentRecordingsResult,
 } from "@/types/research";
 import type { MentionHistoryRow } from "@/types/corpus";
 
+import { RecentRecordings } from "@/components/research/RecentRecordings";
 import { EventHeader } from "@/components/research/EventHeader";
 import { ProgressMessages } from "@/components/research/ProgressMessages";
 import { TabNavigation } from "@/components/research/TabNavigation";
@@ -43,7 +45,7 @@ export default function ResearchDashboard({
   const { eventId } = use(params);
   const searchParams = useSearchParams();
   const modelPreset = searchParams.get("modelPreset") || "sonnet";
-  const initialCorpusCategory = searchParams.get("corpusCategory") || "";
+  const initialCorpusCategories = searchParams.get("corpusCategories") || searchParams.get("corpusCategory") || "";
 
   // ── Core state ──
   const [event, setEvent] = useState<Event | null>(null);
@@ -59,7 +61,7 @@ export default function ResearchDashboard({
   const [mentionData, setMentionData] = useState<MentionHistoryRow[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
   const [corpusCategories, setCorpusCategories] = useState<string[]>(
-    initialCorpusCategory ? [initialCorpusCategory] : []
+    initialCorpusCategories ? initialCorpusCategories.split(",").filter(Boolean).filter((c) => c !== "__all__") : []
   );
   const [categories, setCategories] = useState<string[]>([]);
 
@@ -108,6 +110,7 @@ export default function ResearchDashboard({
   const eventFormatResult = (latestCompletedRun?.event_format_result as EventFormatResult) ?? null;
   const agendaResult = (latestCompletedRun?.agenda_result as AgendaResult) ?? null;
   const newsCycleResult = (latestCompletedRun?.news_cycle_result as NewsCycleResult) ?? null;
+  const recentRecordingsResult = (latestCompletedRun?.recent_recordings_result as RecentRecordingsResult) ?? null;
   const hasBaseline = runs.some((r) => r.layer === "baseline" && r.status === "completed");
   const hasCurrent = runs.some((r) => r.layer === "current" && r.status === "completed");
   const isResolved = eventResults.length > 0;
@@ -203,7 +206,8 @@ export default function ResearchDashboard({
     setMentionLoading(true);
     try {
       const params = new URLSearchParams({ speakerId: selectedSpeakerId });
-      if (corpusCategories.length > 0) params.set("category", corpusCategories.join(","));
+      const realCategories = corpusCategories.filter((c) => c !== "__all__");
+      if (realCategories.length > 0) params.set("category", realCategories.join(","));
       const res = await fetch(`/api/corpus/mention-history?${params}`);
       const data = await res.json();
       setMentionData(data.rows ?? []);
@@ -448,6 +452,8 @@ export default function ResearchDashboard({
             agenda={agendaResult}
             newsCycle={newsCycleResult}
           />
+
+          <RecentRecordings recordings={recentRecordingsResult} />
 
           <WordTable
             wordScores={wordScores}

@@ -56,6 +56,7 @@ export interface ResearchRun {
   news_cycle_result: unknown | null;
   event_format_result: unknown | null;
   market_analysis_result: unknown | null;
+  recent_recordings_result: unknown | null;
   cluster_result: unknown | null;
   synthesis_result: unknown | null;
 }
@@ -73,6 +74,7 @@ export interface ResearchSummary {
   newsCycle: unknown;
   eventFormat: unknown;
   marketAnalysis: unknown;
+  recentRecordings: unknown;
   clusters: unknown;
   synthesis: unknown;
 }

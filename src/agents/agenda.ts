@@ -27,7 +27,7 @@ Search for:
 2. Press secretary briefings mentioning the event
 3. Official agenda or topic list if released
 4. News reporting that previews expected topics or themes
-5. The speaker's recent social media posts (Truth Social for Trump, X/Twitter for others) that hint at what they plan to discuss
+5. The speaker's recent social media posts and public statements that hint at what they plan to discuss
 6. Any leaked talking points or draft excerpts
 7. Congressional or official previews of what topics will be addressed
 
