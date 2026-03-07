@@ -60,6 +60,7 @@ export function WordTable({
   const [sortAsc, setSortAsc] = useState(false);
   const [expandedWord, setExpandedWord] = useState<string | null>(null);
   const [catDropdownOpen, setCatDropdownOpen] = useState(false);
+  const [search, setSearch] = useState("");
 
   // Build mention rate lookup from corpus data
   const mentionRateMap = useMemo(() => {
@@ -143,10 +144,17 @@ export function WordTable({
 
   // When specific categories are selected, only show words that exist in that category's corpus
   const filtered = useMemo(() => {
-    if (selectedCategories.length === 0) return rows;
-    const corpusWords = new Set(mentionData.map((m) => m.word.toLowerCase()));
-    return rows.filter((r) => corpusWords.has(r.word.toLowerCase()));
-  }, [rows, selectedCategories, mentionData]);
+    const searchLower = search.trim().toLowerCase();
+    let result = rows;
+    if (selectedCategories.length > 0) {
+      const corpusWords = new Set(mentionData.map((m) => m.word.toLowerCase()));
+      result = result.filter((r) => corpusWords.has(r.word.toLowerCase()));
+    }
+    if (searchLower) {
+      result = result.filter((r) => r.word.toLowerCase().includes(searchLower));
+    }
+    return result;
+  }, [rows, selectedCategories, mentionData, search]);
 
   const sorted = useMemo(() => {
     const dir = sortAsc ? 1 : -1;
@@ -289,6 +297,14 @@ export function WordTable({
           )}
         </div>
       </div>
+
+      <input
+        type="text"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Search words..."
+        className="w-full px-4 py-2 bg-zinc-900 border border-zinc-700 rounded-lg text-white text-sm placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+      />
 
       {!selectedSpeakerId && (
         <div className="border border-zinc-800 rounded-lg bg-zinc-900/30 p-6 text-center">
