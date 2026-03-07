@@ -36,6 +36,7 @@ import { LoggedTrades } from "@/components/research/LoggedTrades";
 import { ResolveEvent } from "@/components/research/ResolveEvent";
 import { RunHistory } from "@/components/research/RunHistory";
 import { SourcesTab, extractSources } from "@/components/research/SourcesTab";
+import { ResearchNotes } from "@/components/research/ResearchNotes";
 
 export default function ResearchDashboard({
   params,
@@ -495,6 +496,12 @@ export default function ResearchDashboard({
                 setRefreshingMarkets(false);
               }
             }}
+          />
+
+          <ResearchNotes
+            eventId={eventId}
+            preEventNotes={event.pre_event_notes}
+            postEventNotes={event.post_event_notes}
           />
 
           <AgentOutputAccordion researchSummary={researchSummary} />

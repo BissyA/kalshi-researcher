@@ -10,6 +10,8 @@ export interface Event {
   event_date: string;
   estimated_duration_minutes: number | null;
   status: string;
+  pre_event_notes: string | null;
+  post_event_notes: string | null;
 }
 
 export interface WordScore {

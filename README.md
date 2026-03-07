@@ -68,6 +68,7 @@ The research happens in two layers:
 ### What has been tested end-to-end
 - One successful "current" layer research run (Trump Corpus Christi speech, Feb 28 2026)
 - Trade logging from the research dashboard
+- Trade deletion from the LoggedTrades table (with confirmation dialog)
 - Settlement checking via Kalshi API
 - Analytics page rendering with Recharts charts
 - Live WebSocket price streaming
@@ -231,7 +232,7 @@ kalshi-research/
             │
             ├── trades/
             │   ├── log/route.ts          # POST: log a trade
-            │   ├── [tradeId]/route.ts    # PATCH: edit a trade (entry price, contracts) with P&L recalc
+            │   ├── [tradeId]/route.ts    # DELETE: delete a trade. PATCH: edit a trade (entry price, contracts) with P&L recalc
             │   └── results/route.ts      # POST: manual resolution
             │
             ├── settlement/
@@ -886,6 +887,7 @@ If no speaker is selected or the speaker has no series/settlement data, all corp
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/trades/log` | POST | Log a trade with agent probability |
+| `/api/trades/[tradeId]` | DELETE | Delete a trade permanently. Returns `{ success: true }`. |
 | `/api/trades/[tradeId]` | PATCH | Edit a trade's entry price and/or contracts. Recalculates `total_cost_cents`. If trade is already settled, recalculates `pnl_cents` using same formula as `settlement.ts`. |
 | `/api/trades/results` | POST | Manual event resolution |
 | `/api/settlement/check` | POST | Auto-settle via Kalshi API polling |
@@ -988,7 +990,7 @@ Reads `modelPreset` from URL query params (e.g., `/research/abc123?modelPreset=h
 
   Sources with URLs are clickable. Summary badges at the top show counts per type. The `extractSources()` helper function (exported from `SourcesTab.tsx`) handles the extraction logic.
 
-**Trade Log tab**: WordScoresTable (with inline trade forms), LoggedTrades (with inline editing), ResolveEvent
+**Trade Log tab**: WordScoresTable (with inline trade forms), LoggedTrades (with inline editing and deletion), ResolveEvent
 
 ### Corpus Page (`/corpus`)
 Strategic analytics page for long-term speaker data, completely separate from individual research runs. All data here comes from Kalshi's settled market results (ground truth), not from AI agent analysis.
@@ -1170,6 +1172,9 @@ Client hook: `const { prices, status, lastUpdate } = useLivePrices(marketTickers
 
 ### Trade Flow
 1. Log trade → 2. Wait for event → 3. Check settlement (polls Kalshi API) → 4. Auto-resolve → 5. View analytics
+
+### Trade Deletion
+Trades can be deleted from the LoggedTrades table. Each trade row shows a subtle red "✕" button on the right (visible when not in edit mode). Clicking it triggers a browser `confirm()` dialog ("Delete this trade?"). On confirm, sends `DELETE /api/trades/[tradeId]` which permanently removes the trade from the database. The parent page refetches all data so trade counts, analytics, and P&L summaries update immediately. The delete button shows "..." while the request is in flight.
 
 ### Trade Editing
 Trades can be edited after logging (including after settlement). Click on the Entry or Qty values in the LoggedTrades table to edit inline. On save, `PATCH /api/trades/[tradeId]` updates the trade record:
@@ -1898,3 +1903,14 @@ Both layers: double the per-run cost. Failed runs still cost money. The default 
 149. **Web search citation tag stripping** — `src/lib/claude-client.ts` added `finalTextContent.replace(/<\/?cite[^>]*>/g, "")` after extracting text content from Claude's response (line 197). Claude's `web_search_20250305` server-side tool embeds `<cite index="1-2,3-4">...</cite>` citation markers in its text responses. Without stripping, these raw HTML tags appear in agent JSON outputs and render as visible markup in the UI (EventContext, AgentOutputAccordion, etc.). The regex removes both opening `<cite ...>` and closing `</cite>` tags globally. Applied in `callAgent()` so all 5 web-search-enabled agents benefit automatically (historical, agenda, news-cycle, event-format, recent-recordings). The 3 non-web-search agents (market-analysis, clustering, synthesizer) are unaffected since they never produce citation tags.
 
 150. **Recent recordings deduplication** — `src/agents/recent-recordings.ts` updated the prompt's IMPORTANT section to explicitly instruct the agent to deduplicate recordings. Added: "Each recording MUST be a DIFFERENT event (different date or different occasion). Do NOT return the same event twice with slightly different titles or descriptions. Deduplicate by checking dates and event details." Previously, web search results for similar queries (e.g., "Trump roundtable C-SPAN") could return the same event from different pages, and the agent would treat them as separate recordings with slightly different descriptions.
+
+### Phase 20: Trade Deletion (Mar 2026)
+
+151. **Trade deletion API** — `src/app/api/trades/[tradeId]/route.ts` added `DELETE` handler alongside existing `PATCH`. Accepts no body. Deletes the trade record from `trades` table via `supabase.from("trades").delete().eq("id", tradeId)`. Returns `{ success: true }` on success, or `{ error: "Failed to delete trade: ..." }` with status 500 on DB error.
+
+152. **Trade deletion UI** — `src/components/research/LoggedTrades.tsx` updated:
+    - Added `deletingId` state to track which trade is being deleted (shows "..." loading indicator)
+    - Added `deleteTrade(tradeId)` async function: shows `confirm("Delete this trade?")` dialog, sends `DELETE /api/trades/${tradeId}`, calls `onTradeUpdated?.()` on success to trigger parent refetch
+    - Each trade row now shows a subtle red "✕" button (`text-red-500/60`, brightens to `text-red-400` on hover) in the last column when not in edit mode
+    - When in edit mode, the save/cancel buttons replace the delete button (same column, mutually exclusive display)
+    - The action column uses a `flex` container to consistently align buttons
