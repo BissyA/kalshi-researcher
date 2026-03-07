@@ -47,9 +47,10 @@ export async function settleEvent(
           (trade.side === "yes" && result.wasMentioned) ||
           (trade.side === "no" && !result.wasMentioned);
 
+        const costCents = trade.total_cost_cents ?? trade.entry_price * trade.contracts * 100;
         const pnlCents = isWin
-          ? Math.round((1.0 - trade.entry_price) * trade.contracts * 100)
-          : -Math.round(trade.entry_price * trade.contracts * 100);
+          ? trade.contracts * 100 - costCents
+          : -costCents;
 
         await supabase
           .from("trades")

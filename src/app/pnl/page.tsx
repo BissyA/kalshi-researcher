@@ -106,10 +106,10 @@ export default function PnlPage() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(new Set());
 
-  // Calendar month navigation
+  // Calendar month navigation (use UTC to match Kalshi timestamps)
   const now = new Date();
-  const [calYear, setCalYear] = useState(now.getFullYear());
-  const [calMonth, setCalMonth] = useState(now.getMonth());
+  const [calYear, setCalYear] = useState(now.getUTCFullYear());
+  const [calMonth, setCalMonth] = useState(now.getUTCMonth());
 
   async function fetchPnl(bustCache = false) {
     try {
@@ -344,7 +344,8 @@ export default function PnlPage() {
 
                 const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
                 const dayData = dailyPnlMap.get(dateStr);
-                const isToday = dateStr === now.toISOString().slice(0, 10);
+                const todayUtc = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
+                const isToday = dateStr === todayUtc;
 
                 return (
                   <div
@@ -417,7 +418,7 @@ export default function PnlPage() {
                             </td>
                             <td className="px-4 py-3 text-white font-mono text-xs">{ev.eventTicker}</td>
                             <td className="px-4 py-3 text-zinc-400">
-                              {new Date(ev.lastDate).toLocaleDateString()}
+                              {new Date(ev.lastDate).toLocaleDateString("en-US", { timeZone: "UTC" })}
                             </td>
                             <td className="px-4 py-3 text-zinc-400 text-right">{ev.trades.length}</td>
                             <td className={`px-4 py-3 text-right font-mono ${pnlColor(ev.pnlCents)}`}>

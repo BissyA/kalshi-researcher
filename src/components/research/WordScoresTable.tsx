@@ -5,6 +5,7 @@ interface TradeForm {
   side: "yes" | "no";
   entryPrice: number;
   contracts: number;
+  totalCost: number;
 }
 
 interface WordScoresTableProps {
@@ -238,10 +239,12 @@ export function WordScoresTable({
                         onClick={(e) => {
                           e.stopPropagation();
                           const price = livePrice ?? score.market_yes_price ?? 0.5;
+                          const rounded = Math.round(price * 100) / 100;
                           onTradeFormChange({
                             side: "yes",
-                            entryPrice: Math.round(price * 100) / 100,
+                            entryPrice: rounded,
                             contracts: 1,
+                            totalCost: rounded * 1,
                           });
                           onTradeFormWordId(
                             tradeFormWordId === score.word_id ? null : score.word_id
@@ -259,7 +262,7 @@ export function WordScoresTable({
                           <div className="flex gap-2">
                             <button
                               onClick={() =>
-                                onTradeFormChange({ ...tradeForm, side: "yes" })
+                                onTradeFormChange({ ...tradeForm, side: "yes", totalCost: tradeForm.entryPrice * tradeForm.contracts })
                               }
                               className={`flex-1 py-1 rounded text-xs font-medium ${
                                 tradeForm.side === "yes"
@@ -271,7 +274,7 @@ export function WordScoresTable({
                             </button>
                             <button
                               onClick={() =>
-                                onTradeFormChange({ ...tradeForm, side: "no" })
+                                onTradeFormChange({ ...tradeForm, side: "no", totalCost: tradeForm.entryPrice * tradeForm.contracts })
                               }
                               className={`flex-1 py-1 rounded text-xs font-medium ${
                                 tradeForm.side === "no"
@@ -282,21 +285,23 @@ export function WordScoresTable({
                               NO
                             </button>
                           </div>
-                          <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-3 gap-2">
                             <div>
                               <label className="text-xs text-zinc-500">Price</label>
                               <input
                                 type="number"
-                                step="0.01"
-                                min="0.01"
-                                max="0.99"
+                                step="0.001"
+                                min="0.001"
+                                max="0.999"
                                 value={tradeForm.entryPrice}
-                                onChange={(e) =>
+                                onChange={(e) => {
+                                  const price = parseFloat(e.target.value) || 0;
                                   onTradeFormChange({
                                     ...tradeForm,
-                                    entryPrice: parseFloat(e.target.value) || 0,
-                                  })
-                                }
+                                    entryPrice: price,
+                                    totalCost: price * tradeForm.contracts,
+                                  });
+                                }}
                                 className="w-full px-2 py-1 bg-zinc-800 border border-zinc-700 rounded text-white text-xs"
                               />
                             </div>
@@ -306,10 +311,28 @@ export function WordScoresTable({
                                 type="number"
                                 min="1"
                                 value={tradeForm.contracts}
+                                onChange={(e) => {
+                                  const contracts = parseInt(e.target.value) || 1;
+                                  onTradeFormChange({
+                                    ...tradeForm,
+                                    contracts,
+                                    totalCost: tradeForm.entryPrice * contracts,
+                                  });
+                                }}
+                                className="w-full px-2 py-1 bg-zinc-800 border border-zinc-700 rounded text-white text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs text-zinc-500">Cost ($)</label>
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={tradeForm.totalCost || ""}
                                 onChange={(e) =>
                                   onTradeFormChange({
                                     ...tradeForm,
-                                    contracts: parseInt(e.target.value) || 1,
+                                    totalCost: parseFloat(e.target.value) || 0,
                                   })
                                 }
                                 className="w-full px-2 py-1 bg-zinc-800 border border-zinc-700 rounded text-white text-xs"
@@ -318,7 +341,7 @@ export function WordScoresTable({
                           </div>
                           <div className="flex items-center justify-between">
                             <span className="text-xs text-zinc-500">
-                              Cost: {Math.round(tradeForm.entryPrice * tradeForm.contracts * 100)}¢
+                              Cost: ${tradeForm.totalCost}
                             </span>
                             <button
                               onClick={() => onSubmitTrade(score.word_id)}

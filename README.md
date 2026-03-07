@@ -114,7 +114,7 @@ kalshi-research/
 │   │   │   ├── ClusterView.tsx       # Word cluster visualization
 │   │   │   ├── EventHeader.tsx       # Event metadata header
 │   │   │   ├── EventContext.tsx      # React context for event data
-│   │   │   ├── LoggedTrades.tsx      # Trade log with delete
+│   │   │   ├── LoggedTrades.tsx      # Trade log with delete (shown in both Research tab when settled + Trade Log tab)
 │   │   │   ├── RunHistory.tsx        # Research run history
 │   │   │   ├── ResolveEvent.tsx      # Mark event results (mentioned/not mentioned)
 │   │   │   ├── ProgressMessages.tsx  # Research progress indicator
@@ -141,7 +141,7 @@ kalshi-research/
 │   │   ├── kalshi-client.ts          # Kalshi API client (RSA-PSS signing)
 │   │   ├── claude-client.ts          # Claude API wrapper (retry, web search, JSON parsing)
 │   │   ├── supabase.ts              # Supabase server client (service role)
-│   │   ├── settlement.ts            # Settlement checking logic
+│   │   ├── settlement.ts            # Settlement logic — uses total_cost_cents for P&L calculation
 │   │   ├── url-parser.ts            # Kalshi URL/ticker parser
 │   │   └── ui-utils.ts              # Shared UI utilities (edgeColor, confBadge)
 │   └── types/
@@ -151,7 +151,7 @@ kalshi-research/
 │       ├── kalshi.ts                 # Kalshi API response types
 │       └── corpus.ts                 # Corpus-related types (MentionHistoryRow, MentionEventDetail)
 ├── supabase/
-│   └── migrations/                   # SQL migrations (001-009, all applied)
+│   └── migrations/                   # SQL migrations (001-010, all applied)
 │       ├── 001_initial_schema.sql    # Core tables: events, words, word_clusters, research_runs,
 │       │                             #   word_scores, transcripts, trades, event_results + views
 │       ├── 002_rls_policies.sql      # Row Level Security policies
@@ -161,7 +161,8 @@ kalshi-research/
 │       ├── 006_excluded_tickers.sql  # excluded_tickers TEXT[] on series (multi-speaker support)
 │       ├── 007_corpus_categories.sql # events.category, research_runs.corpus_category
 │       ├── 008_recent_recordings.sql # research_runs.recent_recordings_result JSONB
-│       └── 009_event_notes.sql       # events.pre_event_notes, events.post_event_notes
+│       ├── 009_event_notes.sql       # events.pre_event_notes, events.post_event_notes
+│       └── 010_total_cost_real.sql   # trades.total_cost_cents INTEGER → REAL (sub-cent precision)
 ├── docs/
 │   └── kalshi-openapi.yaml           # Full Kalshi OpenAPI spec
 ├── Dockerfile                        # Multi-stage Node 22 Alpine build
@@ -210,7 +211,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 | `research_runs` | Research pipeline execution records | `event_id`, `layer`, `status`, `model_used`, `briefing`, all agent result JSONB columns, token/cost tracking |
 | `word_scores` | Per-word probability scores from research | `word_id`, `research_run_id`, probabilities (historical/agenda/news/base/combined), `edge`, `confidence`, `reasoning`, `key_evidence` |
 | `transcripts` | Cached speaker transcripts | `speaker`, `title`, `event_date`, `full_text`, `word_count`, `word_frequencies` |
-| `trades` | Logged trades | `event_id`, `word_id`, `side`, `entry_price`, `contracts`, `result`, `pnl_cents` |
+| `trades` | Logged trades | `event_id`, `word_id`, `side`, `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL — supports sub-cent precision), `result`, `pnl_cents` |
 | `event_results` | Settlement outcomes per word | `event_id`, `word_id`, `was_mentioned` |
 | `speakers` | Registered speakers for corpus | `name` |
 | `series` | Kalshi series linked to speakers | `speaker_id`, `series_ticker`, `excluded_tickers` |
@@ -222,7 +223,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 
 ### Migrations
 
-All 9 migrations (001-009) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
+All 10 migrations (001-010) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
 
 ```bash
 curl -s -X POST "https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query" \
@@ -342,6 +343,7 @@ Three tabs: **Research**, **Sources**, **Trade Log**
 - `EventHeader` — Event title, speaker, date, duration, status
 - `WordTable` — Primary word analysis table (always visible, see [UI Component Details](#wordtable) below)
 - `WordScoresTable` — Detailed AI-generated scores with inline trade form (visible after research completes)
+- `LoggedTrades` — Settled trade results table (visible only when event is resolved, i.e. `isResolved === true`). Shown between WordTable and ResearchNotes for convenient reference while writing post-event notes.
 - `ResearchNotes` — Two side-by-side textareas:
   - **Pre-Event Analysis** — Research thoughts before the event
   - **Post-Event Review** — Reflections after trades
@@ -360,10 +362,10 @@ Three tabs: **Research**, **Sources**, **Trade Log**
 - Corpus statistics and mention history
 
 **Trade Log Tab:**
-- Log trades with side, price, contracts
-- View logged trades with P&L after settlement
-- Delete logged trades
-- Resolve event (mark words as mentioned/not mentioned)
+- `WordScoresTable` — Full scores table with inline trade form for logging new trades
+- `LoggedTrades` — View logged trades with P&L after settlement, delete trades
+- `ResolveEvent` — Mark words as mentioned/not mentioned, trigger settlement
+- Log trades with side, price, contracts, and editable total cost
 
 ### Corpus Page (`/corpus`)
 
@@ -397,10 +399,12 @@ Then uses **FIFO matching** to pair buy fills with sell fills and settlements:
 
 **5-minute server-side cache** with `?refresh=1` query param to bust cache.
 
+**Timezone Handling:** All dates use **UTC** to match Kalshi's timestamps. The calendar grid, daily P&L map keys, "today" highlight, and per-event table dates all use UTC. The `dailyPnl` entries are keyed by `closeTimestamp.slice(0, 10)` (UTC date from Kalshi). The calendar initial month/year uses `getUTCFullYear()`/`getUTCMonth()`, and per-event dates render with `toLocaleDateString("en-US", { timeZone: "UTC" })`.
+
 **UI Tabs:**
 
 1. **Overview** — Summary cards (Total Trades, Total Profit, Total Fees, Profit After Fees), cumulative P&L line chart (Recharts)
-2. **Calendar** — Monthly grid showing daily P&L, color-coded cells (green = profit, red = loss), month navigation, monthly stats (P&L, trading days, win rate)
+2. **Calendar** — Monthly grid showing daily P&L (net after fees), color-coded cells (green = profit, red = loss), month navigation, monthly stats (P&L, trading days, win rate). Monthly P&L summary shows net value (after fees).
 
 **Per-Event Table** (always visible below either tab):
 - Groups trades by event ticker
@@ -479,11 +483,42 @@ Detailed AI-generated scores table, visible after research pipeline completes. S
 - **Cluster filter** — Filter by word clusters (thematic groups identified by the clustering agent)
 - **Sortable columns** — Word, Est. %, Market, Edge, Confidence
 - **Expandable rows** — Click to see agent reasoning, key evidence, and probability breakdown (historical, agenda, news, base rate)
-- **Inline trade form** — Click trade button to open side/price/contracts form directly in the table row
+- **Inline trade form** — Click trade button to open side/price/contracts/cost form directly in the table row (see [Trade Form](#trade-form) below)
 - **Confidence badges** — Color-coded high/medium/low badges via `confBadge()` from `ui-utils.ts`
 - **Live price column** — Real-time prices from WebSocket, color-coded vs initial market price
 
 **Props:** Receives `wordScores`, `clusters`, `livePrices`, `trades`, trade form state/handlers, sort state, cluster filter state, `researchRunning` flag.
+
+### Trade Form
+
+**Location:** Inline within `WordScoresTable` rows
+
+The trade form allows logging trades with precise cost tracking for both limit and market orders.
+
+**Fields:**
+- **Side** — YES/NO toggle buttons
+- **Price** — Entry price as a decimal (e.g. `0.116` for 11.6¢). Supports sub-cent precision with `step="0.001"`, `min="0.001"`, `max="0.999"`
+- **Contracts** — Number of contracts (integer)
+- **Cost ($)** — Total cost in dollars (e.g. `1.16`). Auto-calculated from `price × contracts` when Price or Contracts change, but **editable** for market order fills where the actual cost differs from `price × contracts`
+
+**TradeForm interface:**
+```typescript
+interface TradeForm {
+  side: "yes" | "no";
+  entryPrice: number;   // Decimal 0-1 (e.g. 0.85 = 85¢)
+  contracts: number;     // Integer
+  totalCost: number;     // Dollars (e.g. 1.16 = $1.16)
+}
+```
+
+**Data flow:**
+1. User enters price + contracts → cost auto-fills as `price × contracts`
+2. User can override cost for market orders (actual fill cost from Kalshi)
+3. On submit, `totalCost` is converted to cents (`totalCost * 100`) and sent to API as `totalCostCents`
+4. API stores `totalCostCents` as `total_cost_cents` (REAL column) in the `trades` table
+5. Settlement P&L uses `total_cost_cents` directly — no rounding anywhere in the chain
+
+**Why this matters:** Market orders on Kalshi fill across multiple price levels, so `price × contracts` doesn't equal the actual cost. The editable cost field lets you enter the exact total from Kalshi's order history.
 
 ### MentionHistoryTable
 
@@ -534,9 +569,14 @@ Returns: `{ summary, dailyPnl, cumulativePnl, events, trades }`
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/trades/log` | POST | Log a trade `{ eventId, wordId, side, entryPrice, contracts, ... }` |
+| `/api/trades/log` | POST | Log a trade `{ eventId, wordId, side, entryPrice, contracts, totalCostCents }` |
 | `/api/trades/results` | GET/POST | Get or set trade results |
 | `/api/trades/[tradeId]` | DELETE | Delete a logged trade |
+
+**Trade log body details:**
+- `entryPrice` — Decimal 0-1 (e.g. `0.116` for 11.6¢)
+- `contracts` — Integer count
+- `totalCostCents` — Total cost in cents as a float (e.g. `116.0` for $1.16). Stored as REAL in Postgres, no rounding.
 
 ### Corpus
 
@@ -632,7 +672,21 @@ Parses Kalshi URLs and raw event tickers. Supports formats like `https://kalshi.
 
 ### `src/lib/settlement.ts`
 
-Settlement checking logic — determines if markets have resolved and what the outcomes were.
+Settlement logic — resolves events by recording word mention results and calculating trade P&L.
+
+**P&L Calculation:**
+- Uses `total_cost_cents` from the trade record (the exact cost the user entered) for P&L
+- Falls back to `entry_price * contracts * 100` for older trades that may have `null` total_cost_cents
+- Win P&L: `contracts * 100 - costCents` (payout minus cost)
+- Loss P&L: `-costCents` (lose the entire cost)
+- No rounding — preserves sub-cent precision throughout
+
+```typescript
+const costCents = trade.total_cost_cents ?? trade.entry_price * trade.contracts * 100;
+const pnlCents = isWin
+  ? trade.contracts * 100 - costCents
+  : -costCents;
+```
 
 ---
 
@@ -699,6 +753,7 @@ All migrations are in `supabase/migrations/` and have been applied to the live d
 | 007 | `007_corpus_categories.sql` | `events.category TEXT`, `research_runs.corpus_category TEXT` |
 | 008 | `008_recent_recordings.sql` | `research_runs.recent_recordings_result JSONB` |
 | 009 | `009_event_notes.sql` | `events.pre_event_notes TEXT`, `events.post_event_notes TEXT` |
+| 010 | `010_total_cost_real.sql` | `trades.total_cost_cents` changed from `INTEGER` to `REAL` for sub-cent precision |
 
 To apply new migrations, use the Supabase Management API (never ask the user to do it manually):
 
@@ -712,6 +767,26 @@ curl -s -X POST "https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/datab
 ---
 
 ## Important Patterns & Gotchas
+
+### Timezone Handling (UTC Everywhere)
+
+All dates in the app use **UTC** to match Kalshi's API timestamps. This is critical for consistency:
+
+- **P&L Calendar:** `calYear`/`calMonth` state initialized from `getUTCFullYear()`/`getUTCMonth()`. Calendar cells build date strings from these UTC values. The "today" highlight uses UTC components.
+- **Daily P&L map:** Keys are `closeTimestamp.slice(0, 10)` — the UTC date portion of Kalshi's close timestamp.
+- **Per-event table dates:** Rendered with `toLocaleDateString("en-US", { timeZone: "UTC" })` to avoid local timezone shifting the displayed date.
+- **Why this matters:** The user may be in a timezone ahead of UTC (e.g. UTC+8). Without UTC handling, a trade closing at `2026-03-07T16:41Z` would display as March 8 in local time, creating a mismatch between the calendar and per-event table.
+
+### Trade Cost Precision
+
+The trade logging system preserves exact cost values with no rounding:
+
+- **Frontend:** `TradeForm.totalCost` is a float in dollars. The Cost ($) input uses `parseFloat`, not `parseInt`. Auto-calculated from `price × contracts` but manually editable for market orders.
+- **Submission:** Converted to cents at submit time: `totalCost * 100` → `totalCostCents`
+- **API:** `totalCostCents` passed through to Supabase without modification
+- **Database:** `trades.total_cost_cents` is `REAL` (not INTEGER) — stores sub-cent values like `11.6`
+- **Settlement:** P&L uses `total_cost_cents` directly, falls back to `entry_price * contracts * 100` for legacy trades
+- **No `Math.round()` anywhere** in the cost chain from form to database to settlement
 
 ### Search Bars
 
@@ -777,6 +852,7 @@ When adding search to other tables, follow this same pattern for consistency.
 - Components in `src/components/research/` are presentational — they receive data via props, with state management living in the page
 - Exception: `WordTable` and `MentionHistoryTable` manage their own internal UI state (search, sort, expand) since these are self-contained interactions
 - The `EventContext` React context provides event data to deeply nested components without prop drilling
+- `LoggedTrades` appears in **two locations**: Research tab (when settled, for note-writing convenience) and Trade Log tab (always)
 
 ### Dead Code Policy
 

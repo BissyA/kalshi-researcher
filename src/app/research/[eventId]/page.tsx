@@ -79,7 +79,7 @@ export default function ResearchDashboard({
   const [trades, setTrades] = useState<Trade[]>([]);
   const [words, setWords] = useState<Word[]>([]);
   const [tradeFormWordId, setTradeFormWordId] = useState<string | null>(null);
-  const [tradeForm, setTradeForm] = useState({ side: "yes" as "yes" | "no", entryPrice: 0.5, contracts: 1 });
+  const [tradeForm, setTradeForm] = useState({ side: "yes" as "yes" | "no", entryPrice: 0.5, contracts: 1, totalCost: 0.5 });
   const [tradeLoading, setTradeLoading] = useState(false);
 
   // ── Resolution state ──
@@ -303,7 +303,6 @@ export default function ResearchDashboard({
   async function submitTrade(wordId: string) {
     setTradeLoading(true);
     try {
-      const totalCostCents = Math.round(tradeForm.entryPrice * tradeForm.contracts * 100);
       const res = await fetch("/api/trades/log", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -313,7 +312,7 @@ export default function ResearchDashboard({
           side: tradeForm.side,
           entryPrice: tradeForm.entryPrice,
           contracts: tradeForm.contracts,
-          totalCostCents,
+          totalCostCents: tradeForm.totalCost * 100,
         }),
       });
       if (res.ok) {
@@ -497,6 +496,15 @@ export default function ResearchDashboard({
               }
             }}
           />
+
+          {isResolved && (
+            <LoggedTrades
+              trades={trades}
+              wordScores={wordScores}
+              words={words}
+              onTradeUpdated={fetchData}
+            />
+          )}
 
           <ResearchNotes
             eventId={eventId}
