@@ -34,6 +34,7 @@ interface WordRow {
   word: string;
   marketTicker: string;
   currentPrice: number;
+  noPrice: number;
   historicalRate: number | null;
   edge: number | null;
   sampleYes: number | null;
@@ -87,6 +88,7 @@ export function WordTable({
       const ticker = ws.words?.kalshi_market_ticker ?? "";
       const live = livePrices[ticker];
       const currentPrice = live ? live.yesAsk : ws.market_yes_price;
+      const noPrice = live?.noAsk || (currentPrice > 0 ? 1 - currentPrice : 0);
 
       const wordName = ws.words?.word ?? "";
       const mention = mentionRateMap.get(wordName.toLowerCase());
@@ -97,6 +99,7 @@ export function WordTable({
         word: wordName,
         marketTicker: ticker,
         currentPrice,
+        noPrice,
         historicalRate,
         edge,
         sampleYes: mention?.yesCount ?? null,
@@ -111,6 +114,7 @@ export function WordTable({
       .map((w): WordRow => {
         const live = livePrices[w.kalshi_market_ticker];
         const currentPrice = live ? live.yesAsk : 0;
+        const noPrice = live?.noAsk || (currentPrice > 0 ? 1 - currentPrice : 0);
         const mention = mentionRateMap.get(w.word.toLowerCase());
         const historicalRate = mention?.rate ?? null;
         const edge = historicalRate !== null && currentPrice > 0
@@ -121,6 +125,7 @@ export function WordTable({
           word: w.word,
           marketTicker: w.kalshi_market_ticker,
           currentPrice,
+          noPrice,
           historicalRate,
           edge,
           sampleYes: mention?.yesCount ?? null,
@@ -321,9 +326,7 @@ export function WordTable({
               {(
                 [
                   ["word", "Word"],
-                  ["price", "Market Price"],
-                  ["rate", "Historical Rate"],
-                  ["edge", "Edge"],
+                  ["price", "Yes Price"],
                 ] as [SortKey, string][]
               ).map(([key, label]) => (
                 <th
@@ -332,6 +335,24 @@ export function WordTable({
                   className={`px-4 py-3 font-medium cursor-pointer hover:text-white transition-colors ${
                     key === "word" ? "text-left text-zinc-300" : "text-right text-zinc-400"
                   }`}
+                >
+                  {label}
+                  {sortArrow(key)}
+                </th>
+              ))}
+              <th className="px-4 py-3 text-right text-zinc-400 font-medium">
+                No Price
+              </th>
+              {(
+                [
+                  ["rate", "Historical Rate"],
+                  ["edge", "Edge"],
+                ] as [SortKey, string][]
+              ).map(([key, label]) => (
+                <th
+                  key={key}
+                  onClick={() => handleSort(key)}
+                  className="px-4 py-3 font-medium cursor-pointer hover:text-white transition-colors text-right text-zinc-400"
                 >
                   {label}
                   {sortArrow(key)}
@@ -383,6 +404,9 @@ function WordRowGroup({
         <td className="px-4 py-3 text-right text-zinc-200">
           {(row.currentPrice * 100).toFixed(0)}&cent;
         </td>
+        <td className="px-4 py-3 text-right text-zinc-200">
+          {row.noPrice > 0 ? <>{(row.noPrice * 100).toFixed(0)}&cent;</> : <span className="text-zinc-600">&mdash;</span>}
+        </td>
         <td className="px-4 py-3 text-right">
           {row.historicalRate !== null ? (
             <span
@@ -416,7 +440,7 @@ function WordRowGroup({
       </tr>
       {isExpanded && row.events.length > 0 && (
         <tr>
-          <td colSpan={6} className="bg-zinc-900/60 px-4 py-0">
+          <td colSpan={7} className="bg-zinc-900/60 px-4 py-0">
             <div className="py-3">
               <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
                 Event-by-Event Results

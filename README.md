@@ -114,7 +114,7 @@ kalshi-research/
 │   │   │   ├── AgentOutputAccordion.tsx # Expandable per-agent results
 │   │   │   ├── ClusterView.tsx       # Word cluster visualization
 │   │   │   ├── EventHeader.tsx       # Event metadata header
-│   │   │   ├── EventContext.tsx      # React context for event data
+│   │   │   ├── EventContext.tsx      # Event context panel (format, agenda, news cycle, trending topics)
 │   │   │   ├── LoggedTrades.tsx      # Trade log with delete (shown in both Research tab when settled + Trade Log tab)
 │   │   │   ├── RunHistory.tsx        # Research run history
 │   │   │   ├── ResolveEvent.tsx      # Mark event results (mentioned/not mentioned)
@@ -350,7 +350,7 @@ Three tabs: **Research**, **Sources**, **Trade Log**
   - **Post-Event Review** — Reflections after trades
   - Auto-saves with 800ms debounce (no save button), shows "Saving..."/"Saved" indicator
   - Stored in `events.pre_event_notes` and `events.post_event_notes`
-- `RecentRecordings` — Recent recordings discovered by the research pipeline
+- `RecentRecordings` — Recent recordings discovered by the research pipeline. Handles two response shapes from the AI agent: (1) standard `{ recordings: [...] }` with clickable video links, and (2) fallback `{ status: "error", available_content: [...], recommendations: [...] }` when the agent couldn't find direct URLs. The fallback renders a "Recent Events" section showing known events (date, type, participants, sources) without links, plus a "Where to find recordings" list of recommendations.
 - `AgentOutputAccordion` — Expandable sections showing raw output from each AI agent
 - `ResearchBriefing` — AI-generated markdown briefing with top recommendations
 - `ClusterView` — Visual grouping of correlated words
@@ -433,10 +433,11 @@ This means `action` is **completely irrelevant** for position tracking. The prev
 **UI Tabs:**
 
 1. **Overview** — Summary cards (Total Trades, Total Profit, Total Fees, Profit After Fees), cumulative P&L line chart (Recharts)
-2. **Calendar** — Monthly grid showing daily P&L (net after fees), color-coded cells (green = profit, red = loss), month navigation, monthly stats (P&L, trading days, win rate). Monthly P&L summary shows net value (after fees).
+2. **Calendar** — Monthly grid showing daily P&L (net after fees), color-coded cells (green = profit, red = loss), month navigation, monthly stats (P&L, trading days, win rate). Monthly P&L summary shows net value (after fees). An 8th "WEEK" column on the right shows the net weekly P&L for each row (sum of all days in that week), using the same green/red coloring and `dollars()` formatting.
 
 **Per-Event Table** (always visible below either tab):
 - Groups trades by event ticker
+- **Event titles** resolved via two-tier lookup: first from Supabase `events` table (for events researched in the app), then from Kalshi API `/events/{event_ticker}` as fallback (for events traded but not researched). Falls back to raw ticker if neither source has a title.
 - Shows P&L, fees, net per event
 - Expandable rows showing individual trade details (ticker, side, qty, entry/exit price, P&L, fees, net)
 - Refresh button to pull latest data from Kalshi
@@ -484,7 +485,7 @@ interface PositionMismatch {
   };
   dailyPnl: DailyPnl[];           // Per-day aggregated P&L
   cumulativePnl: { date, cumulativeCents, dailyCents }[];  // For chart
-  events: EventGroup[];           // Trades grouped by event ticker
+  events: EventGroup[];           // Trades grouped by event ticker, with resolved titles
   trades: ProcessedTrade[];       // All individual trades
 }
 ```
@@ -504,7 +505,8 @@ The primary word analysis table on the research page. Always visible regardless 
 - **Speaker selector** — Dropdown to select speaker for loading historical mention rates from corpus
 - **Category filter** — Multi-select dropdown to filter by corpus event categories (e.g. "This event" vs specific categories). When categories are selected, only shows words that exist in that category's corpus data.
 - **Refresh Markets button** — Fetches latest market prices from Kalshi API
-- **Sortable columns** — Word, Market Price, Historical Rate, Edge (default sort: edge descending)
+- **Sortable columns** — Word, Yes Price, Historical Rate, Edge (default sort: edge descending)
+- **No Price column** — Shows the No-side ask price alongside the Yes-side ask price. Derived from `1 - yesAsk` on initial load (before WebSocket data arrives), then updated via WebSocket `noAsk` (computed as `1 - yesBid`) once live data flows in. See [Price Architecture](#price-architecture-yes--no) below.
 - **Expandable rows** — Click a word row to see event-by-event mention history (which events the word was mentioned in, with dates and MENTIONED/NOT MENTIONED badges)
 - **Color-coded rates** — Historical rate badges: green (>=60%), yellow (>=30%), red (>0%), grey (no data)
 - **Edge coloring** — Uses `edgeColor()` from `ui-utils.ts` for positive/negative edge styling
@@ -530,7 +532,24 @@ interface WordTableProps {
 
 **Internal state:** `sortKey`, `sortAsc`, `expandedWord`, `catDropdownOpen`, `search`
 
-**Data flow:** Builds `WordRow[]` by merging `wordScores` + `livePrices` + `mentionRateMap` (from corpus). Also includes "unscored" words from `allWords` that don't have research scores yet (newly added markets). Filtering pipeline: category filter → search filter → sort.
+**WordRow interface (internal):**
+```typescript
+interface WordRow {
+  word: string;
+  marketTicker: string;
+  currentPrice: number;     // Yes ask price (0-1 scale)
+  noPrice: number;          // No ask price (0-1 scale) — see Price Architecture section
+  historicalRate: number | null;
+  edge: number | null;
+  sampleYes: number | null;
+  sampleTotal: number | null;
+  events: MentionEventDetail[];
+}
+```
+
+**Table columns (in order):** Word | Yes Price | No Price | Historical Rate | Edge | Sample | expand arrow
+
+**Data flow:** Builds `WordRow[]` by merging `wordScores` + `livePrices` + `mentionRateMap` (from corpus). Also includes "unscored" words from `allWords` that don't have research scores yet (newly added markets). `noPrice` is derived from `livePrices[ticker].noAsk` when available, falling back to `1 - currentPrice`. Filtering pipeline: category filter → search filter → sort.
 
 ### WordScoresTable
 
@@ -620,7 +639,7 @@ Word mention history table on the corpus page. Shows how often each word has bee
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/pnl` | GET | Full P&L data from Kalshi fills + settlements. Add `?refresh=1` to bust cache |
+| `/api/pnl` | GET | Full P&L data from Kalshi fills + settlements. Resolves event titles from Supabase + Kalshi API fallback. Add `?refresh=1` to bust cache |
 | `/api/pnl/debug` | GET | Diagnostic endpoint: fill counts per source, historical cutoff, position validation |
 
 Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
@@ -649,7 +668,7 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | `/api/corpus/import-historical` | POST | Bulk import historical events from Kalshi |
 | `/api/corpus/mention-history` | GET | Get word mention history |
 | `/api/corpus/kalshi-series` | GET | Search Kalshi for series |
-| `/api/corpus/quick-prices` | GET | Quick market price lookup |
+| `/api/corpus/quick-prices` | GET | Quick market price lookup. Returns `yesBid`, `yesAsk`, `noAsk`, `lastPrice`, `volume` per market |
 
 ### Transcripts
 
@@ -724,7 +743,7 @@ Shared UI utility functions:
 
 ### `src/hooks/useLivePrices.ts`
 
-React hook for real-time Kalshi price updates via WebSocket. Returns `Record<string, PriceData>` keyed by market ticker.
+React hook for real-time Kalshi price updates via WebSocket. Returns `Record<string, PriceData>` keyed by market ticker. Computes `noAsk` as `1 - yesBid` since the Kalshi WS ticker channel does not include no-side price fields (see [Price Architecture](#price-architecture-yes--no)).
 
 ### `src/lib/url-parser.ts`
 
@@ -832,7 +851,7 @@ curl -s -X POST "https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/datab
 
 All dates in the app use **UTC** to match Kalshi's API timestamps. This is critical for consistency:
 
-- **P&L Calendar:** `calYear`/`calMonth` state initialized from `getUTCFullYear()`/`getUTCMonth()`. Calendar cells build date strings from these UTC values. The "today" highlight uses UTC components.
+- **P&L Calendar:** `calYear`/`calMonth` state initialized from `getUTCFullYear()`/`getUTCMonth()`. Calendar cells build date strings from these UTC values. The "today" highlight uses UTC components. The calendar uses an 8-column grid (`grid-cols-[repeat(7,1fr)_auto]`) with days chunked into weekly rows and a fixed-width (w-20) weekly summary column on the right.
 - **Daily P&L map:** Keys are `closeTimestamp.slice(0, 10)` — the UTC date portion of Kalshi's close timestamp.
 - **Per-event table dates:** Rendered with `toLocaleDateString("en-US", { timeZone: "UTC" })` to avoid local timezone shifting the displayed date.
 - **Why this matters:** The user may be in a timezone ahead of UTC (e.g. UTC+8). Without UTC handling, a trade closing at `2026-03-07T16:41Z` would display as March 8 in local time, creating a mismatch between the calendar and per-event table.
@@ -894,11 +913,57 @@ When adding search to other tables, follow this same pattern for consistency.
 - Transcript metadata from the historical agent is cached in the `transcripts` table for future runs
 - Token usage and cost are tracked cumulatively across all agents and saved to the research run record
 
+### Price Architecture (Yes + No)
+
+The Word Analysis table shows both **Yes Price** (yes_ask) and **No Price** (no_ask) columns. Prices flow through two paths:
+
+**1. WebSocket (real-time updates via `useLivePrices` hook):**
+
+The Kalshi WebSocket `ticker` channel sends these fields per message:
+```
+market_id, market_ticker, price, yes_bid, yes_ask, price_dollars,
+yes_bid_dollars, yes_ask_dollars, volume, volume_fp, open_interest,
+open_interest_fp, dollar_volume, dollar_open_interest, yes_bid_size_fp,
+yes_ask_size_fp, last_trade_size_fp, ts, time, Clock
+```
+
+**The WS ticker channel does NOT send `no_ask_dollars` or any no-side fields.** However, for Kalshi binary markets, `no_ask = 1 - yes_bid` exactly (verified against REST API `no_ask_dollars` on live markets). This is because buying a No contract at the ask is economically equivalent to selling a Yes contract at the bid — they are two sides of the same order book.
+
+The `useLivePrices` hook computes: `noAsk = yesBid > 0 ? 1 - yesBid : 0`
+
+When `yesBid` is 0 (no bids on the yes side), `noAsk` is set to 0, which the UI renders as "—". This is correct — if no one is bidding on Yes, there's no meaningful No ask price to derive.
+
+**2. REST API (initial load + quick-prices):**
+
+The REST endpoint `GET /events/{eventTicker}` returns full market objects including `no_ask_dollars` directly. The `/api/corpus/quick-prices` route reads this field and returns it as `noAsk`.
+
+**3. WordTable fallback (before WS connects):**
+
+Before the first WebSocket tick arrives, `livePrices` is empty. `WordTable` falls back to deriving No Price from the existing Yes price: `noPrice = 1 - currentPrice` (where `currentPrice` comes from `market_yes_price` stored in the DB). This uses `yesAsk` rather than `yesBid`, so it's approximate (off by the bid-ask spread), but ensures the No Price column is populated immediately on page load rather than showing "—" until WS connects.
+
+```typescript
+// In WordTable row building:
+const noPrice = live?.noAsk || (currentPrice > 0 ? 1 - currentPrice : 0);
+```
+
+**PriceData interface:**
+```typescript
+interface PriceData {
+  yesBid: number;    // Best bid for YES contracts
+  yesAsk: number;    // Best ask for YES contracts (price to buy YES)
+  noAsk: number;     // Best ask for NO contracts (price to buy NO) — computed as 1 - yesBid from WS
+  lastPrice: number; // Last trade price
+  volume: string;
+  openInterest: string;
+}
+```
+
 ### WebSocket Prices
 
 - `useLivePrices` hook connects to Kalshi's WebSocket via a server-side proxy at `/api/ws/prices`
 - Provides real-time price updates for word contracts on the research page
 - Returns `Record<string, PriceData>` where keys are market tickers
+- The proxy (`/api/ws/prices`) subscribes to the `ticker` channel and forwards raw `data.msg` objects via Server-Sent Events (SSE)
 
 ### Auto-Save Notes
 
@@ -917,8 +982,26 @@ When adding search to other tables, follow this same pattern for consistency.
 - Research page (`src/app/research/[eventId]/page.tsx`) is a single `"use client"` page component that manages all state and passes props down to child components
 - Components in `src/components/research/` are presentational — they receive data via props, with state management living in the page
 - Exception: `WordTable` and `MentionHistoryTable` manage their own internal UI state (search, sort, expand) since these are self-contained interactions
-- The `EventContext` React context provides event data to deeply nested components without prop drilling
+- `EventContext` is a presentational component (not a React context) that displays event format, agenda, news cycle, and trending topics from phase 1 agent results
 - `LoggedTrades` appears in **two locations**: Research tab (when settled, for note-writing convenience) and Trade Log tab (always)
+
+### AI Agent Response Defensiveness
+
+AI agents (Claude) may return JSON in unexpected shapes — missing fields, alternative structures, or error objects instead of the expected schema. All components that consume agent results must use optional chaining (`?.`) when accessing nested properties, especially arrays.
+
+**Known patterns:**
+- `EventContext.tsx` — Uses `?.length` on `sourcesFound`, `relatedWords`, `wordsUsed`, and `data.relatedWords` because these may be absent from agent output
+- `RecentRecordings.tsx` — The recent recordings agent may return `{ recordings: [...] }` (success) OR `{ status: "error", available_content: [...], recommendations: [...] }` (when it can't find URLs). The component handles both shapes.
+- **General rule:** Never trust that an AI-generated JSONB field has the exact shape defined in the TypeScript interface. Always use optional chaining on nested array/object access from `research_runs.*_result` columns.
+
+### Kalshi WebSocket Ticker Fields
+
+The Kalshi WS `ticker` channel does **NOT** include no-side price fields (`no_ask_dollars`, `no_bid_dollars`). It only sends yes-side prices (`yes_bid_dollars`, `yes_ask_dollars`). For binary markets, the no-side prices can be derived:
+
+- `no_ask = 1 - yes_bid` (price to buy No = complement of best Yes bid)
+- `no_bid = 1 - yes_ask` (price to sell No = complement of best Yes ask)
+
+This was verified against the Kalshi REST API `no_ask_dollars` on live markets (e.g. `KX60MINMENTION-26MAR09`) — the values match exactly. The `useLivePrices` hook uses this derivation. The REST API (`GET /events/{ticker}`, `GET /markets/{ticker}`) does return `no_ask_dollars` directly.
 
 ### Dead Code Policy
 

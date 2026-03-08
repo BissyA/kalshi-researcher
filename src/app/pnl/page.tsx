@@ -51,6 +51,7 @@ interface ProcessedTrade {
 
 interface EventGroup {
   eventTicker: string;
+  title: string | null;
   trades: ProcessedTrade[];
   pnlCents: number;
   feesCents: number;
@@ -327,50 +328,88 @@ export default function PnlPage() {
           {/* Calendar Grid */}
           <div className="border border-zinc-800 rounded-lg overflow-hidden">
             {/* Day headers */}
-            <div className="grid grid-cols-7 bg-zinc-900 border-b border-zinc-800">
+            <div className="grid grid-cols-[repeat(7,1fr)_auto] bg-zinc-900 border-b border-zinc-800">
               {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map((day) => (
                 <div key={day} className="px-2 py-3 text-center text-xs font-medium text-zinc-500">
                   {day}
                 </div>
               ))}
+              <div className="w-20 px-2 py-3 text-center text-xs font-medium text-zinc-500">
+                WEEK
+              </div>
             </div>
 
-            {/* Day cells */}
-            <div className="grid grid-cols-7">
-              {getCalendarDays(calYear, calMonth).map((day, i) => {
-                if (day === null) {
-                  return <div key={`empty-${i}`} className="border-b border-r border-zinc-800/50 h-24 bg-zinc-950/50" />;
+            {/* Day cells — chunked into weeks */}
+            {(() => {
+              const allDays = getCalendarDays(calYear, calMonth);
+              const weeks: (number | null)[][] = [];
+              for (let i = 0; i < allDays.length; i += 7) {
+                weeks.push(allDays.slice(i, i + 7));
+              }
+
+              const todayUtc = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
+
+              return weeks.map((week, wi) => {
+                let weekPnl = 0;
+                let weekHasTrades = false;
+
+                // Pre-calculate weekly P&L
+                for (const day of week) {
+                  if (day === null) continue;
+                  const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+                  const dayData = dailyPnlMap.get(dateStr);
+                  if (dayData) {
+                    weekPnl += dayData.pnlAfterFeesCents;
+                    weekHasTrades = true;
+                  }
                 }
 
-                const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-                const dayData = dailyPnlMap.get(dateStr);
-                const todayUtc = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
-                const isToday = dateStr === todayUtc;
-
                 return (
-                  <div
-                    key={dateStr}
-                    className={`border-b border-r border-zinc-800/50 h-24 p-2 relative ${
-                      dayData ? pnlBg(dayData.pnlAfterFeesCents) : ""
-                    } ${isToday ? "ring-1 ring-purple-500/50" : ""}`}
-                  >
-                    <span className={`text-xs ${isToday ? "text-purple-400 font-bold" : "text-zinc-500"}`}>
-                      {day}
-                    </span>
-                    {dayData && (
-                      <div className="mt-2">
-                        <div className={`text-sm font-semibold ${pnlColor(dayData.pnlAfterFeesCents)}`}>
-                          {dollars(dayData.pnlAfterFeesCents)}
+                  <div key={`week-${wi}`} className="grid grid-cols-[repeat(7,1fr)_auto]">
+                    {week.map((day, di) => {
+                      if (day === null) {
+                        return <div key={`empty-${wi}-${di}`} className="border-b border-r border-zinc-800/50 h-24 bg-zinc-950/50" />;
+                      }
+
+                      const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+                      const dayData = dailyPnlMap.get(dateStr);
+                      const isToday = dateStr === todayUtc;
+
+                      return (
+                        <div
+                          key={dateStr}
+                          className={`border-b border-r border-zinc-800/50 h-24 p-2 relative ${
+                            dayData ? pnlBg(dayData.pnlAfterFeesCents) : ""
+                          } ${isToday ? "ring-1 ring-purple-500/50" : ""}`}
+                        >
+                          <span className={`text-xs ${isToday ? "text-purple-400 font-bold" : "text-zinc-500"}`}>
+                            {day}
+                          </span>
+                          {dayData && (
+                            <div className="mt-2">
+                              <div className={`text-sm font-semibold ${pnlColor(dayData.pnlAfterFeesCents)}`}>
+                                {dollars(dayData.pnlAfterFeesCents)}
+                              </div>
+                              <div className="text-[10px] text-zinc-500 mt-0.5">
+                                {dayData.tradeCount} trade{dayData.tradeCount !== 1 ? "s" : ""}
+                              </div>
+                            </div>
+                          )}
                         </div>
-                        <div className="text-[10px] text-zinc-500 mt-0.5">
-                          {dayData.tradeCount} trade{dayData.tradeCount !== 1 ? "s" : ""}
-                        </div>
-                      </div>
-                    )}
+                      );
+                    })}
+                    {/* Weekly summary cell */}
+                    <div className="w-20 border-b border-zinc-800/50 h-24 flex items-center justify-center">
+                      {weekHasTrades && (
+                        <span className={`text-sm font-semibold ${pnlColor(weekPnl)}`}>
+                          {dollars(weekPnl)}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 );
-              })}
-            </div>
+              });
+            })()}
           </div>
         </div>
       )}
@@ -416,7 +455,9 @@ export default function PnlPage() {
                                 &#9654;
                               </span>
                             </td>
-                            <td className="px-4 py-3 text-white font-mono text-xs">{ev.eventTicker}</td>
+                            <td className="px-4 py-3 text-white text-xs">
+                              {ev.title ?? <span className="font-mono">{ev.eventTicker}</span>}
+                            </td>
                             <td className="px-4 py-3 text-zinc-400">
                               {new Date(ev.lastDate).toLocaleDateString("en-US", { timeZone: "UTC" })}
                             </td>

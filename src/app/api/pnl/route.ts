@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { kalshiFetch } from "@/lib/kalshi-client";
+import { getServerSupabase } from "@/lib/supabase";
 
 interface KalshiFill {
   fill_id: string;
@@ -366,9 +367,45 @@ export async function GET(request: Request) {
       eventMap.set(eventTicker, existing);
     }
 
-    const events = Array.from(eventMap.values()).sort(
+    const eventsRaw = Array.from(eventMap.values()).sort(
       (a, b) => new Date(b.lastDate).getTime() - new Date(a.lastDate).getTime()
     );
+
+    // Look up event titles from Supabase
+    const eventTickers = eventsRaw.map((e) => e.eventTicker);
+    const supabase = getServerSupabase();
+    const { data: dbEvents } = await supabase
+      .from("events")
+      .select("kalshi_event_ticker, title")
+      .in("kalshi_event_ticker", eventTickers);
+
+    const titleMap = new Map<string, string>();
+    for (const ev of dbEvents ?? []) {
+      titleMap.set(ev.kalshi_event_ticker, ev.title);
+    }
+
+    // Fallback: fetch titles from Kalshi API for events not in Supabase
+    const missingTickers = eventTickers.filter((t) => !titleMap.has(t));
+    if (missingTickers.length > 0) {
+      const kalshiFetches = missingTickers.map(async (ticker) => {
+        try {
+          const res = await kalshiFetch("GET", `/events/${ticker}`);
+          if (res.ok) {
+            const data = await res.json();
+            const title = data.event?.title;
+            if (title) titleMap.set(ticker, title);
+          }
+        } catch {
+          // skip — will fall back to ticker
+        }
+      });
+      await Promise.all(kalshiFetches);
+    }
+
+    const events = eventsRaw.map((e) => ({
+      ...e,
+      title: titleMap.get(e.eventTicker) ?? null,
+    }));
 
     const result = {
       summary: {

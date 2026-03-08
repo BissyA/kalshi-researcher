@@ -45,6 +45,7 @@ export async function GET(request: Request) {
       status: string;
       yes_bid_dollars: string;
       yes_ask_dollars: string;
+      no_ask_dollars: string;
       last_price_dollars: string;
       volume_fp: string;
     }[] = data.markets ?? event.markets ?? [];
@@ -56,6 +57,7 @@ export async function GET(request: Request) {
         word: extractWord(m.ticker, eventTicker, m.yes_sub_title),
         yesBid: parseFloat(m.yes_bid_dollars) || 0,
         yesAsk: parseFloat(m.yes_ask_dollars) || 0,
+        noAsk: parseFloat(m.no_ask_dollars) || 0,
         lastPrice: parseFloat(m.last_price_dollars) || 0,
         volume: m.volume_fp ?? "0",
       }));

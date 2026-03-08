@@ -204,7 +204,7 @@ export function EventContext({ eventFormat, agenda, newsCycle }: EventContextPro
                   {agenda.overallNotes}
                 </p>
               )}
-              {agenda.sourcesFound.length > 0 && (
+              {agenda.sourcesFound?.length > 0 && (
                 <div className="space-y-1.5">
                   <div className="text-xs text-zinc-500">Sources</div>
                   {agenda.sourcesFound.map((src, i) => (
@@ -244,7 +244,7 @@ export function EventContext({ eventFormat, agenda, newsCycle }: EventContextPro
                       <p className="text-xs text-zinc-400 leading-relaxed">
                         {topic.description}
                       </p>
-                      {topic.relatedWords.length > 0 && (
+                      {topic.relatedWords?.length > 0 && (
                         <div className="flex gap-1.5 mt-1.5 flex-wrap">
                           {topic.relatedWords.map((word) => (
                             <span
@@ -275,7 +275,7 @@ export function EventContext({ eventFormat, agenda, newsCycle }: EventContextPro
                       <span className="text-zinc-400">{stmt.platform}</span>
                       {stmt.date && <span className="text-zinc-500"> ({stmt.date})</span>}
                       <span className="text-zinc-300"> — {stmt.summary}</span>
-                      {stmt.wordsUsed.length > 0 && (
+                      {stmt.wordsUsed?.length > 0 && (
                         <div className="flex gap-1 mt-1 flex-wrap">
                           {stmt.wordsUsed.map((word) => (
                             <span
@@ -312,7 +312,7 @@ export function EventContext({ eventFormat, agenda, newsCycle }: EventContextPro
                       <p className="text-xs text-zinc-400 leading-relaxed">
                         {data.evidence}
                       </p>
-                      {data.relatedWords.length > 0 && (
+                      {data.relatedWords?.length > 0 && (
                         <div className="flex gap-1.5 mt-1.5 flex-wrap">
                           {data.relatedWords.map((word) => (
                             <span

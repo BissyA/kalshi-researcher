@@ -5,6 +5,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 export interface PriceData {
   yesBid: number;
   yesAsk: number;
+  noAsk: number;
   lastPrice: number;
   volume: string;
   openInterest: string;
@@ -30,11 +31,13 @@ export function useLivePrices(marketTickers: string[]): UseLivePricesResult {
     if (!mountedRef.current) return;
     try {
       const msg = JSON.parse(event.data);
+      const yesBid = parseFloat(msg.yes_bid_dollars) || 0;
       setPrices((prev) => ({
         ...prev,
         [msg.market_ticker]: {
-          yesBid: parseFloat(msg.yes_bid_dollars) || 0,
+          yesBid,
           yesAsk: parseFloat(msg.yes_ask_dollars) || 0,
+          noAsk: yesBid > 0 ? 1 - yesBid : 0,
           lastPrice: parseFloat(msg.price_dollars) || 0,
           volume: msg.volume_fp ?? "0",
           openInterest: msg.open_interest_fp ?? "0",
