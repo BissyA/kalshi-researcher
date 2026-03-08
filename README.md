@@ -68,7 +68,8 @@ kalshi-research/
 │   │       │   ├── status/[runId]/route.ts # GET — poll pipeline progress
 │   │       │   └── stop/route.ts     # POST — cancel running research
 │   │       ├── pnl/
-│   │       │   └── route.ts          # GET — P&L from Kalshi fills + settlements
+│   │       │   ├── route.ts          # GET — P&L from Kalshi fills + settlements (FIFO offset matching)
+│   │       │   └── debug/route.ts    # GET — P&L diagnostics (fill counts, theory validation)
 │   │       ├── trades/
 │   │       │   ├── log/route.ts      # POST — log a trade
 │   │       │   ├── results/route.ts  # GET/POST — trade results & settlement
@@ -384,18 +385,46 @@ Three tabs: **Research**, **Sources**, **Trade Log**
 
 ### P&L Page (`/pnl`)
 
-Pulls data directly from Kalshi APIs (no CSV uploads needed).
+Pulls data directly from Kalshi APIs (no CSV uploads needed). **Verified to match Kalshi's official P&L numbers to the penny** (as shown on Kalshi's Documents/Tax page).
 
-**Data Source:** The API route (`/api/pnl/route.ts`) fetches:
+**Data Source:** The API route (`/api/pnl/route.ts`) fetches from three Kalshi endpoints in parallel:
 - `/portfolio/fills` — Current portfolio fill history
-- `/historical/fills` — Historical fill data
+- `/historical/fills` — Historical fill data (before the historical cutoff date)
 - `/portfolio/settlements` — Settlement results
 
-Then uses **FIFO matching** to pair buy fills with sell fills and settlements:
-- Buy fills create open positions per ticker/side
-- Sell fills close positions via FIFO (first-in-first-out)
-- Settlements close remaining open positions when markets resolve
-- Most positions close via settlement, not sells
+Fills are deduplicated by `fill_id` (historical and portfolio endpoints may overlap).
+
+**Kalshi Fill Model (CRITICAL — read before modifying P&L code):**
+
+On Kalshi, **ALL fills create positions**. The `side` field (yes/no) determines the position type, and the `action` field (buy/sell) indicates order book side (taker vs maker), **NOT whether the position is opening or closing**.
+
+- A fill with `side=yes` creates a YES position, regardless of `action`
+- A fill with `side=no` creates a NO position, regardless of `action`
+- To **exit** a YES position, the user acquires NO contracts (fill with `side=no`). This is NOT a "sell" in the traditional sense — it's buying the opposite side.
+- At settlement, offsetting YES+NO pairs net out: one side pays 100¢, the other pays 0¢
+
+This means `action` is **completely irrelevant** for position tracking. The previous (incorrect) implementation treated `action=sell` as closing a position, which caused massive P&L errors (~$204 pre-fee discrepancy, turning losses into gains).
+
+**Two-Phase FIFO Matching Algorithm:**
+
+1. **Phase 1 — Offset Matching:** For each ticker, all fills are sorted chronologically and placed into YES or NO queues based on `side`. Offsetting YES+NO positions are matched FIFO. P&L per offset pair = `100 - yes_price - no_price` per contract. These represent "exits" where the user locked in P&L by acquiring the opposite side.
+
+2. **Phase 2 — Settlement:** Remaining unmatched single-side positions are settled using `market_result`:
+   - YES position + market result YES → exit at 100¢ (win)
+   - YES position + market result NO → exit at 0¢ (loss)
+   - NO position + market result NO → exit at 100¢ (win)
+   - NO position + market result YES → exit at 0¢ (loss)
+
+**Fee Handling:**
+- Each fill's `fee_cost` (string dollar amount, e.g. `"0.03"`) is converted to cents and tracked per position entry
+- For offset matches (Phase 1), fees from both the YES and NO fills are summed
+- For settlements (Phase 2), only the original fill's fee is used — settlement has no additional close fee (confirmed via Kalshi CSV export where `close_fees=0` for settled positions)
+- The settlement's `fee_cost` field is an **aggregate** of all fees for that market (informational only), NOT an additional fee to add
+- When a fill is partially matched, fees are split proportionally with the remainder going to the last match (avoids rounding drift)
+
+**Position Validation:**
+- The API validates computed positions against settlement data (`settlement.yes_count` / `settlement.no_count`)
+- Any mismatches are returned in `diagnostics.positionMismatches` (should be empty if the fill model is correct)
 
 **5-minute server-side cache** with `?refresh=1` query param to bust cache.
 
@@ -417,16 +446,46 @@ Then uses **FIFO matching** to pair buy fills with sell fills and settlements:
 ```typescript
 interface ProcessedTrade {
   ticker: string;
-  side: "yes" | "no";
+  side: "yes" | "no";          // The side of the original (opening) position
   quantity: number;
-  entryPriceCents: number;    // Entry price in cents (0-100)
-  exitPriceCents: number;     // Exit price: sell price or settlement (0 or 100)
-  feeCents: number;
-  pnlCents: number;           // Raw P&L = (exit - entry) * quantity
-  pnlAfterFeesCents: number;  // P&L minus fees
-  openTimestamp: string;
-  closeTimestamp: string;
-  closedVia: "sell" | "settlement";
+  entryPriceCents: number;     // Entry price in cents (0-100)
+  exitPriceCents: number;      // Exit: (100 - opposite_side_price) for offsets, or 0/100 for settlement
+  feeCents: number;            // Combined fees from all fills involved in this trade
+  pnlCents: number;            // Raw P&L before fees
+  pnlAfterFeesCents: number;   // P&L minus fees
+  openTimestamp: string;        // When the first fill (opening position) occurred
+  closeTimestamp: string;       // When the offsetting fill or settlement occurred
+  closedVia: "sell" | "settlement";  // "sell" = offset match, "settlement" = market resolved
+}
+
+interface PositionMismatch {
+  ticker: string;
+  ourYes: number;              // YES contracts we computed from fills
+  settlementYes: number;       // YES contracts Kalshi says at settlement
+  ourNo: number;               // NO contracts we computed from fills
+  settlementNo: number;        // NO contracts Kalshi says at settlement
+}
+```
+
+**API Response Shape:**
+
+```typescript
+{
+  summary: {
+    totalTrades: number;           // Count of ProcessedTrade entries
+    totalPnlCents: number;         // Sum of all pnlCents
+    totalFeesCents: number;        // Sum of all feeCents
+    totalPnlAfterFeesCents: number; // Sum of all pnlAfterFeesCents
+    totalFills: number;            // Raw fill count from Kalshi (after dedup)
+    totalSettlements: number;      // Settlement count from Kalshi
+  };
+  diagnostics: {
+    positionMismatches: PositionMismatch[];  // Should be empty
+  };
+  dailyPnl: DailyPnl[];           // Per-day aggregated P&L
+  cumulativePnl: { date, cumulativeCents, dailyCents }[];  // For chart
+  events: EventGroup[];           // Trades grouped by event ticker
+  trades: ProcessedTrade[];       // All individual trades
 }
 ```
 
@@ -562,8 +621,9 @@ Word mention history table on the corpus page. Shows how often each word has bee
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/pnl` | GET | Full P&L data from Kalshi fills + settlements. Add `?refresh=1` to bust cache |
+| `/api/pnl/debug` | GET | Diagnostic endpoint: fill counts per source, historical cutoff, position validation |
 
-Returns: `{ summary, dailyPnl, cumulativePnl, events, trades }`
+Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 
 ### Trades
 
@@ -800,11 +860,17 @@ When adding search to other tables, follow this same pattern for consistency.
 
 ### Kalshi Fill Matching (P&L)
 
-- Kalshi fills represent individual buy/sell actions. Most positions close via **market settlement**, not sells
+**CRITICAL: On Kalshi, ALL fills create positions.** The `side` field determines position type (YES or NO). The `action` field (buy/sell) indicates order book side (taker/maker) and is **irrelevant for position tracking**. Do NOT use `action` to determine if a fill opens or closes a position — this was a previous bug that caused ~$204 P&L error.
+
+- Exiting a position = acquiring the opposite side (e.g., to exit YES, buy NO contracts)
 - The P&L API fetches from both `/portfolio/fills` AND `/historical/fills`, then deduplicates by `fill_id`
-- FIFO matching: buy fills create open positions; sell fills close them first-in-first-out; remaining positions close at settlement (100 or 0 cents based on `market_result`)
-- Prices in fills are in cents (0-100 scale)
+- **Two-phase FIFO matching:**
+  1. Match offsetting YES vs NO positions per ticker (FIFO). P&L = `100 - yes_price - no_price` per contract
+  2. Settle remaining single-side positions at 0 or 100 based on `market_result`
+- Prices in fills are in integer cents (0-100 scale)
 - Fee cost comes as a string dollar amount (e.g. `"0.03"`) — multiply by 100 for cents
+- Settlement `fee_cost` is an aggregate total (informational), NOT an additional fee — do not add it to trade fees
+- Position counts are validated against `settlement.yes_count` / `settlement.no_count` — mismatches indicate a bug in fill processing
 
 ### Supabase
 

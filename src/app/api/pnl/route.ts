@@ -16,6 +16,7 @@ interface KalshiFill {
 
 interface KalshiSettlement {
   ticker: string;
+  event_ticker?: string;
   market_result: "yes" | "no" | "void";
   yes_count: number;
   no_count: number;
@@ -48,6 +49,14 @@ interface DailyPnl {
   tradeCount: number;
 }
 
+interface PositionMismatch {
+  ticker: string;
+  ourYes: number;
+  settlementYes: number;
+  ourNo: number;
+  settlementNo: number;
+}
+
 async function fetchAllPaginated<T>(endpoint: string, key: string): Promise<T[]> {
   const all: T[] = [];
   let cursor: string | undefined;
@@ -73,17 +82,37 @@ async function fetchAllPaginated<T>(endpoint: string, key: string): Promise<T[]>
   return all;
 }
 
+interface PositionEntry {
+  fill: KalshiFill;
+  remaining: number;
+  remainingFeeCents: number;
+}
+
+/**
+ * Kalshi fill matching logic:
+ *
+ * On Kalshi, ALL fills create positions. The `side` field determines the position type
+ * (YES or NO), and the `action` field (buy/sell) indicates order book side, NOT whether
+ * the position is opening or closing.
+ *
+ * Exiting a position is done by acquiring the opposite side:
+ *   - To exit YES: acquire NO contracts (fill side=no)
+ *   - To exit NO: acquire YES contracts (fill side=yes)
+ *
+ * At settlement, offsetting YES+NO positions net out (one side pays 100, the other 0).
+ * The P&L for an offset pair: 100 - yes_entry - no_entry per contract.
+ *
+ * We match offsetting positions FIFO, then settle any remaining single-side positions.
+ */
 function matchFillsAndSettlements(
   fills: KalshiFill[],
   settlements: KalshiSettlement[]
-): ProcessedTrade[] {
-  // Build settlement lookup: ticker -> settlement
+): { trades: ProcessedTrade[]; diagnostics: { positionMismatches: PositionMismatch[] } } {
   const settlementMap = new Map<string, KalshiSettlement>();
   for (const s of settlements) {
     settlementMap.set(s.ticker, s);
   }
 
-  // Group fills by ticker
   const byTicker = new Map<string, KalshiFill[]>();
   for (const fill of fills) {
     const existing = byTicker.get(fill.ticker) ?? [];
@@ -92,80 +121,104 @@ function matchFillsAndSettlements(
   }
 
   const trades: ProcessedTrade[] = [];
+  const positionMismatches: PositionMismatch[] = [];
 
   for (const [ticker, tickerFills] of byTicker) {
     tickerFills.sort((a, b) => new Date(a.created_time).getTime() - new Date(b.created_time).getTime());
 
-    // Track open buy positions per side (FIFO queues)
-    const openPositions: { side: "yes" | "no"; fills: { fill: KalshiFill; remaining: number; feeCents: number }[] }[] = [
-      { side: "yes", fills: [] },
-      { side: "no", fills: [] },
-    ];
-
-    const getQueue = (side: "yes" | "no") => openPositions.find(p => p.side === side)!.fills;
+    // ALL fills create positions — side determines the queue, action is irrelevant
+    const yesQueue: PositionEntry[] = [];
+    const noQueue: PositionEntry[] = [];
 
     for (const fill of tickerFills) {
       const feeCents = Math.round(parseFloat(fill.fee_cost || "0") * 100);
-      const queue = getQueue(fill.side);
-
-      if (fill.action === "buy") {
-        queue.push({ fill, remaining: fill.count, feeCents });
-      } else if (fill.action === "sell") {
-        // Match sells against open buys (FIFO)
-        let remaining = fill.count;
-        while (remaining > 0 && queue.length > 0) {
-          const entry = queue[0];
-          const matched = Math.min(remaining, entry.remaining);
-
-          const entryPrice = fill.side === "yes" ? entry.fill.yes_price : entry.fill.no_price;
-          const exitPrice = fill.side === "yes" ? fill.yes_price : fill.no_price;
-          const pnl = (exitPrice - entryPrice) * matched;
-          const entryFeeShare = entry.remaining > 0 ? Math.round(entry.feeCents * (matched / entry.remaining)) : 0;
-          const exitFeeShare = fill.count > 0 ? Math.round(feeCents * (matched / fill.count)) : 0;
-          const totalFee = entryFeeShare + exitFeeShare;
-
-          trades.push({
-            ticker,
-            side: fill.side,
-            quantity: matched,
-            entryPriceCents: entryPrice,
-            exitPriceCents: exitPrice,
-            feeCents: totalFee,
-            pnlCents: pnl,
-            pnlAfterFeesCents: pnl - totalFee,
-            openTimestamp: entry.fill.created_time,
-            closeTimestamp: fill.created_time,
-            closedVia: "sell",
-          });
-
-          remaining -= matched;
-          entry.remaining -= matched;
-          entry.feeCents -= entryFeeShare;
-          if (entry.remaining <= 0) queue.shift();
-        }
-      }
+      const queue = fill.side === "yes" ? yesQueue : noQueue;
+      queue.push({ fill, remaining: fill.count, remainingFeeCents: feeCents });
     }
 
-    // Now settle remaining open positions via settlement
+    // Validate against settlement
     const settlement = settlementMap.get(ticker);
+    const ourYes = yesQueue.reduce((s, e) => s + e.remaining, 0);
+    const ourNo = noQueue.reduce((s, e) => s + e.remaining, 0);
+    if (settlement && (ourYes !== settlement.yes_count || ourNo !== settlement.no_count)) {
+      positionMismatches.push({
+        ticker,
+        ourYes,
+        settlementYes: settlement.yes_count,
+        ourNo,
+        settlementNo: settlement.no_count,
+      });
+    }
+
+    // Phase 1: Match offsetting YES vs NO positions (FIFO)
+    // This represents "exits" — user acquired opposite side to lock in P&L
+    while (yesQueue.length > 0 && noQueue.length > 0 &&
+           yesQueue[0].remaining > 0 && noQueue[0].remaining > 0) {
+      const yesEntry = yesQueue[0];
+      const noEntry = noQueue[0];
+      const matched = Math.min(yesEntry.remaining, noEntry.remaining);
+
+      const yesPrice = yesEntry.fill.yes_price;
+      const noPrice = noEntry.fill.no_price;
+
+      // P&L = 100 (guaranteed payout from one side) - yes_cost - no_cost
+      const pnlPerContract = 100 - yesPrice - noPrice;
+      const pnl = pnlPerContract * matched;
+
+      // Present as a YES trade: entry=yes_price, exit=(100-no_price)
+      // This matches Kalshi's CSV format where exit is the YES price at time of exit
+      const exitPriceCents = 100 - noPrice;
+
+      // Fees from both sides
+      const isLastYes = matched === yesEntry.remaining;
+      const isLastNo = matched === noEntry.remaining;
+      const yesFee = isLastYes
+        ? yesEntry.remainingFeeCents
+        : Math.round(yesEntry.remainingFeeCents * matched / yesEntry.remaining);
+      const noFee = isLastNo
+        ? noEntry.remainingFeeCents
+        : Math.round(noEntry.remainingFeeCents * matched / noEntry.remaining);
+      const totalFee = yesFee + noFee;
+
+      // Determine which came first (the open) and which came second (the close)
+      const yesTime = new Date(yesEntry.fill.created_time).getTime();
+      const noTime = new Date(noEntry.fill.created_time).getTime();
+      const openTimestamp = yesTime <= noTime ? yesEntry.fill.created_time : noEntry.fill.created_time;
+      const closeTimestamp = yesTime <= noTime ? noEntry.fill.created_time : yesEntry.fill.created_time;
+      const side = yesTime <= noTime ? "yes" as const : "no" as const;
+      const entryPrice = side === "yes" ? yesPrice : noPrice;
+
+      trades.push({
+        ticker,
+        side,
+        quantity: matched,
+        entryPriceCents: entryPrice,
+        exitPriceCents: side === "yes" ? exitPriceCents : (100 - yesPrice),
+        feeCents: totalFee,
+        pnlCents: pnl,
+        pnlAfterFeesCents: pnl - totalFee,
+        openTimestamp,
+        closeTimestamp,
+        closedVia: "sell",
+      });
+
+      yesEntry.remaining -= matched;
+      yesEntry.remainingFeeCents -= yesFee;
+      noEntry.remaining -= matched;
+      noEntry.remainingFeeCents -= noFee;
+      if (yesEntry.remaining <= 0) yesQueue.shift();
+      if (noEntry.remaining <= 0) noQueue.shift();
+    }
+
+    // Phase 2: Settle remaining unmatched positions via settlement
     if (!settlement) continue;
-
     const resultIsYes = settlement.market_result === "yes";
-    const settlementFeeCents = Math.round(parseFloat(settlement.fee_cost || "0") * 100);
 
-    // Settle remaining YES buys
-    const yesQueue = getQueue("yes");
-    let totalYesSettled = 0;
-    const totalYesRemaining = yesQueue.reduce((s, e) => s + e.remaining, 0);
-    for (const entry of [...yesQueue]) {
+    for (const entry of yesQueue) {
       if (entry.remaining <= 0) continue;
       const exitPrice = resultIsYes ? 100 : 0;
       const entryPrice = entry.fill.yes_price;
       const pnl = (exitPrice - entryPrice) * entry.remaining;
-      // Distribute settlement fee proportionally
-      const feeShare = totalYesRemaining > 0
-        ? Math.round(settlementFeeCents * (entry.remaining / (totalYesRemaining + getQueue("no").reduce((s, e) => s + e.remaining, 0))))
-        : 0;
 
       trades.push({
         ticker,
@@ -173,28 +226,21 @@ function matchFillsAndSettlements(
         quantity: entry.remaining,
         entryPriceCents: entryPrice,
         exitPriceCents: exitPrice,
-        feeCents: entry.feeCents + feeShare,
+        feeCents: entry.remainingFeeCents,
         pnlCents: pnl,
-        pnlAfterFeesCents: pnl - entry.feeCents - feeShare,
+        pnlAfterFeesCents: pnl - entry.remainingFeeCents,
         openTimestamp: entry.fill.created_time,
         closeTimestamp: settlement.settled_time,
         closedVia: "settlement",
       });
-      totalYesSettled += entry.remaining;
       entry.remaining = 0;
     }
 
-    // Settle remaining NO buys
-    const noQueue = getQueue("no");
-    const totalNoRemaining = noQueue.reduce((s, e) => s + e.remaining, 0);
-    for (const entry of [...noQueue]) {
+    for (const entry of noQueue) {
       if (entry.remaining <= 0) continue;
       const exitPrice = resultIsYes ? 0 : 100;
       const entryPrice = entry.fill.no_price;
       const pnl = (exitPrice - entryPrice) * entry.remaining;
-      const feeShare = totalNoRemaining > 0
-        ? Math.round(settlementFeeCents * (entry.remaining / (totalNoRemaining + totalYesSettled)))
-        : 0;
 
       trades.push({
         ticker,
@@ -202,9 +248,9 @@ function matchFillsAndSettlements(
         quantity: entry.remaining,
         entryPriceCents: entryPrice,
         exitPriceCents: exitPrice,
-        feeCents: entry.feeCents + feeShare,
+        feeCents: entry.remainingFeeCents,
         pnlCents: pnl,
-        pnlAfterFeesCents: pnl - entry.feeCents - feeShare,
+        pnlAfterFeesCents: pnl - entry.remainingFeeCents,
         openTimestamp: entry.fill.created_time,
         closeTimestamp: settlement.settled_time,
         closedVia: "settlement",
@@ -213,7 +259,7 @@ function matchFillsAndSettlements(
     }
   }
 
-  return trades;
+  return { trades, diagnostics: { positionMismatches } };
 }
 
 function buildDailyPnl(trades: ProcessedTrade[]): DailyPnl[] {
@@ -267,7 +313,7 @@ export async function GET(request: Request) {
     const allFills = Array.from(fillMap.values());
 
     // Match fills + settlements into trades
-    const trades = matchFillsAndSettlements(allFills, settlements);
+    const { trades, diagnostics } = matchFillsAndSettlements(allFills, settlements);
 
     // Sort trades by close time
     trades.sort((a, b) => new Date(a.closeTimestamp).getTime() - new Date(b.closeTimestamp).getTime());
@@ -333,6 +379,7 @@ export async function GET(request: Request) {
         totalFills: allFills.length,
         totalSettlements: settlements.length,
       },
+      diagnostics,
       dailyPnl,
       cumulativePnl,
       events,
