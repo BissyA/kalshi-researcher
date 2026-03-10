@@ -37,6 +37,7 @@ import { ResolveEvent } from "@/components/research/ResolveEvent";
 import { RunHistory } from "@/components/research/RunHistory";
 import { SourcesTab, extractSources } from "@/components/research/SourcesTab";
 import { ResearchNotes } from "@/components/research/ResearchNotes";
+import { QuickTradeTable } from "@/components/research/QuickTradeTable";
 
 export default function ResearchDashboard({
   params,
@@ -524,24 +525,38 @@ export default function ResearchDashboard({
       {/* ── Trade Log Tab ── */}
       {activeTab === "tradelog" && (
         <div className="space-y-6">
-          <WordScoresTable
-            wordScores={wordScores}
-            clusters={clusters}
-            livePrices={livePrices}
-            trades={trades}
-            tradeFormWordId={tradeFormWordId}
-            tradeForm={tradeForm}
-            tradeLoading={tradeLoading}
-            onTradeFormWordId={setTradeFormWordId}
-            onTradeFormChange={setTradeForm}
-            onSubmitTrade={submitTrade}
-            sortKey={sortKey}
-            sortAsc={sortAsc}
-            onSort={handleSort}
-            filterCluster={filterCluster}
-            onFilterClusterChange={setFilterCluster}
-            researchRunning={researchRunning}
-          />
+          {wordScores.length > 0 ? (
+            <WordScoresTable
+              wordScores={wordScores}
+              clusters={clusters}
+              livePrices={livePrices}
+              trades={trades}
+              tradeFormWordId={tradeFormWordId}
+              tradeForm={tradeForm}
+              tradeLoading={tradeLoading}
+              onTradeFormWordId={setTradeFormWordId}
+              onTradeFormChange={setTradeForm}
+              onSubmitTrade={submitTrade}
+              sortKey={sortKey}
+              sortAsc={sortAsc}
+              onSort={handleSort}
+              filterCluster={filterCluster}
+              onFilterClusterChange={setFilterCluster}
+              researchRunning={researchRunning}
+            />
+          ) : (
+            <QuickTradeTable
+              words={words}
+              livePrices={livePrices}
+              trades={trades}
+              tradeFormWordId={tradeFormWordId}
+              tradeForm={tradeForm}
+              tradeLoading={tradeLoading}
+              onTradeFormWordId={setTradeFormWordId}
+              onTradeFormChange={setTradeForm}
+              onSubmitTrade={submitTrade}
+            />
+          )}
 
           <LoggedTrades
             trades={trades}

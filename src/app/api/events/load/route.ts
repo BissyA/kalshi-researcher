@@ -100,7 +100,6 @@ export async function POST(request: Request) {
 
     // Upsert words
     const words = kalshiMarkets
-      .filter((m) => m.status === "active" || m.status === "open")
       .map((m) => ({
         event_id: dbEvent.id,
         kalshi_market_ticker: m.ticker,

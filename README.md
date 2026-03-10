@@ -58,7 +58,7 @@ kalshi-research/
 │   │   └── api/
 │   │       ├── events/
 │   │       │   ├── load/route.ts     # POST — load event from Kalshi URL/ticker
-│   │       │   ├── list/route.ts     # GET — list previously researched events
+│   │       │   ├── list/route.ts     # GET — list events with research runs or logged trades
 │   │       │   ├── speaker/route.ts  # PATCH — assign speaker to event
 │   │       │   ├── notes/route.ts    # PATCH — save pre/post event notes
 │   │       │   └── refresh-markets/route.ts  # POST — refresh market prices
@@ -115,6 +115,7 @@ kalshi-research/
 │   │   │   ├── ClusterView.tsx       # Word cluster visualization
 │   │   │   ├── EventHeader.tsx       # Event metadata header
 │   │   │   ├── EventContext.tsx      # Event context panel (format, agenda, news cycle, trending topics)
+│   │   │   ├── QuickTradeTable.tsx   # Standalone trade table for logging trades without research (uses words list)
 │   │   │   ├── LoggedTrades.tsx      # Trade log with delete (shown in both Research tab when settled + Trade Log tab)
 │   │   │   ├── RunHistory.tsx        # Research run history
 │   │   │   ├── ResolveEvent.tsx      # Mark event results (mentioned/not mentioned)
@@ -315,13 +316,17 @@ Configurable per-research-run via the UI:
 
 ```
 User pastes Kalshi URL
-  → /api/events/load (fetches event + markets from Kalshi API, saves to Supabase)
+  → /api/events/load (fetches event + ALL markets from Kalshi API, saves to Supabase)
   → User selects speaker, corpus categories, model preset
+  → "Start Baseline Research" navigates to /research/[eventId] (does NOT auto-trigger research)
+  → User can immediately log trades via Trade Log tab (QuickTradeTable uses words from DB)
+  → User optionally clicks "Start Research" to trigger AI pipeline
   → /api/research/trigger (creates research_run, starts orchestrator in background)
   → Orchestrator runs Phase 1 → Phase 2 → Phase 3
   → Results saved to Supabase (research_runs, word_scores, word_clusters)
   → Frontend polls /api/research/status/[runId] for progress
   → /api/research/[eventId] returns full results for display
+  → Trade Log tab upgrades to WordScoresTable (with AI scores + inline trade form)
 ```
 
 ---
@@ -363,7 +368,9 @@ Three tabs: **Research**, **Sources**, **Trade Log**
 - Corpus statistics and mention history
 
 **Trade Log Tab:**
-- `WordScoresTable` — Full scores table with inline trade form for logging new trades
+- **Trade logging works without research.** When no research has been run, `QuickTradeTable` renders using the event's `words` list (loaded from Kalshi). When research results exist, `WordScoresTable` renders instead (with AI scores + inline trade form).
+- `QuickTradeTable` — Lightweight trade table showing all words with live prices, search, sorting, and the same inline trade form (side/price/contracts/editable cost). Uses `words` from Supabase (always available after event load), not `wordScores` (only available after research).
+- `WordScoresTable` — Full scores table with inline trade form for logging new trades (only shown when research has been run)
 - `LoggedTrades` — View logged trades with P&L after settlement, delete trades
 - `ResolveEvent` — Mark words as mentioned/not mentioned, trigger settlement
 - Log trades with side, price, contracts, and editable total cost
@@ -551,6 +558,45 @@ interface WordRow {
 
 **Data flow:** Builds `WordRow[]` by merging `wordScores` + `livePrices` + `mentionRateMap` (from corpus). Also includes "unscored" words from `allWords` that don't have research scores yet (newly added markets). `noPrice` is derived from `livePrices[ticker].noAsk` when available, falling back to `1 - currentPrice`. Filtering pipeline: category filter → search filter → sort.
 
+### QuickTradeTable
+
+**File:** `src/components/research/QuickTradeTable.tsx`
+
+Standalone trade logging table that works **without running research**. Renders in the Trade Log tab when no word scores exist (i.e. research hasn't been run). Uses the event's `words` list from Supabase (populated by `/api/events/load`) instead of requiring `wordScores` from the research pipeline.
+
+**Features:**
+- **Search bar** — Text input filters words by name (same pattern as `WordTable`)
+- **Sortable columns** — Word (alphabetical, default), Yes Price, No Price
+- **Inline trade form** — Same trade form as `WordScoresTable` (side/price/contracts/editable cost)
+- **Trade count badge** — Shows `Trade (N)` when trades exist for a word
+- **Live prices** — Shows real-time prices from WebSocket when available, `-` for settled markets
+
+**Props interface:**
+```typescript
+interface QuickTradeTableProps {
+  words: Word[];
+  livePrices: Record<string, PriceData>;
+  trades: Trade[];
+  tradeFormWordId: string | null;
+  tradeForm: TradeForm;
+  tradeLoading: boolean;
+  onTradeFormWordId: (id: string | null) => void;
+  onTradeFormChange: (form: TradeForm) => void;
+  onSubmitTrade: (wordId: string) => void;
+}
+```
+
+**Internal state:** `search`, `sortKey`, `sortAsc`
+
+**Conditional rendering in Trade Log tab:**
+```typescript
+{wordScores.length > 0 ? (
+  <WordScoresTable ... />    // Research has been run — show AI scores + trade form
+) : (
+  <QuickTradeTable ... />    // No research — show simple word list + trade form
+)}
+```
+
 ### WordScoresTable
 
 **File:** `src/components/research/WordScoresTable.tsx`
@@ -569,9 +615,9 @@ Detailed AI-generated scores table, visible after research pipeline completes. S
 
 ### Trade Form
 
-**Location:** Inline within `WordScoresTable` rows
+**Location:** Inline within `WordScoresTable` rows and `QuickTradeTable` rows
 
-The trade form allows logging trades with precise cost tracking for both limit and market orders.
+The trade form allows logging trades with precise cost tracking for both limit and market orders. The same form pattern is used in both components — both use the shared `tradeForm`/`tradeFormWordId` state from the research page.
 
 **Fields:**
 - **Side** — YES/NO toggle buttons
@@ -620,8 +666,8 @@ Word mention history table on the corpus page. Shows how often each word has bee
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/events/load` | POST | Load event from Kalshi URL/ticker. Creates/updates event + words in Supabase |
-| `/api/events/list` | GET | List all events in Supabase |
+| `/api/events/load` | POST | Load event from Kalshi URL/ticker. Creates/updates event + words in Supabase. Saves **all** markets regardless of status (active, settled, closed, etc.) |
+| `/api/events/list` | GET | List events that have at least one research run OR logged trades. Queries both `research_runs` and `trades` tables in parallel for event IDs |
 | `/api/events/speaker` | PATCH | Assign speaker to event `{ eventId, speakerId }` |
 | `/api/events/notes` | PATCH | Save research notes `{ eventId, field: "pre_event_notes" or "post_event_notes", value }` |
 | `/api/events/refresh-markets` | POST | Refresh market prices from Kalshi |
@@ -1002,6 +1048,26 @@ The Kalshi WS `ticker` channel does **NOT** include no-side price fields (`no_as
 - `no_bid = 1 - yes_ask` (price to sell No = complement of best Yes ask)
 
 This was verified against the Kalshi REST API `no_ask_dollars` on live markets (e.g. `KX60MINMENTION-26MAR09`) — the values match exactly. The `useLivePrices` hook uses this derivation. The REST API (`GET /events/{ticker}`, `GET /markets/{ticker}`) does return `no_ask_dollars` directly.
+
+### Trade Logging Without Research
+
+Trade logging is **decoupled from the research pipeline**. The Trade Log tab works in two modes:
+
+1. **No research run** → `QuickTradeTable` renders using the event's `words` array (always available after `/api/events/load`)
+2. **Research completed** → `WordScoresTable` renders with full AI scores, probabilities, and inline trade form
+
+The trade logging API (`/api/trades/log`) handles both cases gracefully:
+- When research exists: records `agent_estimated_probability` and `agent_edge` from the latest word score
+- When no research exists: these fields are `null` — the trade is still logged with all other fields populated
+
+**Home page event visibility:** Events appear in the home page "Researched Events" list if they have at least one research run OR at least one logged trade. This ensures events with trades (but no research) remain accessible for editing/viewing.
+
+### Event Loading — Market Status Filter
+
+The `/api/events/load` route saves **all markets** returned by the Kalshi API for an event, regardless of their status (active, open, settled, closed, finalized). Previously it filtered to only `active`/`open` markets, which caused settled/ended events to have zero or few words saved. This was changed because:
+- Users need to log trades for events that have already ended
+- The word list is needed for `QuickTradeTable` to render in the Trade Log tab
+- Settled markets still have valid ticker and word data even without live prices
 
 ### Dead Code Policy
 
