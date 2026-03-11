@@ -48,6 +48,12 @@ export default function RootLayout({
                   Analytics
                 </Link>
                 <Link
+                  href="/trade-analytics"
+                  className="text-sm text-zinc-400 hover:text-white transition-colors"
+                >
+                  Trade Analytics
+                </Link>
+                <Link
                   href="/pnl"
                   className="text-sm text-zinc-400 hover:text-white transition-colors"
                 >

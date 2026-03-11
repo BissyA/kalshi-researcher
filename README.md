@@ -46,13 +46,15 @@ kalshi-research/
 ├── src/
 │   ├── app/                          # Next.js App Router pages & API routes
 │   │   ├── page.tsx                  # Home — URL input, event loader, research launcher
-│   │   ├── layout.tsx                # Root layout with nav (Corpus, Analytics, P&L)
+│   │   ├── layout.tsx                # Root layout with nav (Corpus, Analytics, Trade Analytics, P&L)
 │   │   ├── research/
 │   │   │   └── [eventId]/page.tsx    # Research output page (tabs: Research, Sources, Trade Log)
 │   │   ├── corpus/
 │   │   │   └── page.tsx              # Corpus management (speakers, series, transcripts)
 │   │   ├── analytics/
 │   │   │   └── page.tsx              # Performance analytics (logged trades, win rates)
+│   │   ├── trade-analytics/
+│   │   │   └── page.tsx              # Per-word trade analytics (speaker filter, edge analysis)
 │   │   ├── pnl/
 │   │   │   └── page.tsx              # P&L dashboard (Overview + Calendar tabs, per-event table)
 │   │   └── api/
@@ -75,7 +77,8 @@ kalshi-research/
 │   │       │   ├── results/route.ts  # GET/POST — trade results & settlement
 │   │       │   └── [tradeId]/route.ts # DELETE — remove a logged trade
 │   │       ├── analytics/
-│   │       │   └── performance/route.ts # GET — aggregate performance stats
+│   │       │   ├── performance/route.ts # GET — aggregate performance stats
+│   │       │   └── trade-analytics/route.ts # GET — per-word trade analytics by speaker
 │   │       ├── corpus/
 │   │       │   ├── speakers/route.ts # GET/POST — manage speakers
 │   │       │   ├── series/route.ts   # GET/POST — manage Kalshi series
@@ -389,6 +392,102 @@ Three tabs: **Research**, **Sources**, **Trade Log**
 - Overall stats: total trades, wins, losses, win rate, total P&L, expected value
 - Per-event performance table with expandable trade details
 - Shows word-level breakdown: side, entry price, mention rate, edge, result, P&L
+
+### Trade Analytics Page (`/trade-analytics`)
+
+Per-word trade performance analysis, designed to evaluate edge at the word level across speakers. Unlike the Analytics page (which groups by event), Trade Analytics groups by **word** — so you can see your track record for "China" across all events regardless of which speech it was from.
+
+**Speaker Filter:**
+- Dropdown selector at the top to filter by individual speakers or "All Speakers" (aggregates across all speakers)
+- "All" re-aggregates word-level data across speakers (same word from different speakers merges into one row)
+
+**Summary Cards (6 boxes at top):**
+- Total Trades — count of resolved trades
+- Wins — total wins
+- Losses — total losses
+- Win Rate — percentage
+- Total P&L — dollar amount, green/red colored
+- EV (Expected Value) — average P&L per trade (`totalPnl / totalTrades`), green/red colored
+
+**Per-Word Performance Table:**
+
+Sorted by P&L descending (highest profit words at top). Columns:
+
+| Column | Description |
+|--------|-------------|
+| Word | The word/phrase traded |
+| Side | YES/NO badge (green/red). Shows "mixed" if both sides traded |
+| # Trades | Number of resolved trades for this word |
+| Avg Entry | Average entry price in cents. **Hover tooltip** shows all individual entries horizontally (e.g. "72¢, 15¢, 30¢") sorted most recent first — important for spotting if the average masks wide variation |
+| Win Rate | Combined format: percentage + W/L record, e.g. `67% (2W / 1L)`. Fixed-width formatting for vertical alignment. Normal text color (not green/red) |
+| Edge | `Win Rate - Avg Entry`. Green if positive (paying less than win rate), red if negative (overpaying). This is the core metric — positive edge means profitable long-term |
+| P&L | Dollar P&L, green/red colored |
+
+**Expandable Word Rows:**
+- Click any word row to expand and see individual trade details
+- Expand shows a sub-table with columns: Event (event title), Side (YES/NO badge), Date, Entry (price in cents), Result (W/L), P&L
+- Trade details sorted by most recent first (chronologically descending by `created_at`)
+
+**Key Concept — Edge:**
+- `Edge = Win Rate - Average Entry Price`
+- Positive edge = you're paying less than what the word is actually worth based on your results
+- Negative edge = you're overpaying relative to your actual win rate
+- Example: 67% win rate with 42¢ avg entry = +25% edge (buying at 42¢ something worth 67¢)
+- Use this to identify words where you need better entries (lower price) or should stop trading entirely
+
+**Data Source:**
+- Only uses **resolved** trades (where `result` is not null)
+- Groups trades by speaker → word (normalized to lowercase for grouping)
+- Fetches from `trades`, `words`, `events`, and `speakers` tables
+- Entries array is sorted by `created_at` descending (most recent first) for the hover tooltip
+
+**API:** `GET /api/analytics/trade-analytics`
+
+**Response shape:**
+```typescript
+{
+  speakers: SpeakerData[];  // Per-speaker breakdown
+  all: SpeakerData;         // Aggregated across all speakers
+}
+
+interface SpeakerData {
+  speakerId: string;
+  speakerName: string;
+  summary: {
+    totalTrades: number;
+    wins: number;
+    losses: number;
+    winRate: number;          // 0-1 decimal
+    totalPnlCents: number;
+    totalPnlDollars: string;  // Formatted, e.g. "2.14"
+    ev: string;               // Per-trade EV in dollars, e.g. "0.11"
+  };
+  words: WordRow[];           // Sorted by pnlCents descending
+}
+
+interface WordRow {
+  word: string;
+  side: string;               // "yes", "no", or "mixed"
+  trades: number;
+  avgEntry: number;           // 0-1 decimal
+  winRate: number;            // 0-1 decimal
+  edge: number;               // winRate - avgEntry
+  wins: number;
+  losses: number;
+  pnlCents: number;
+  entries: number[];          // Individual entry prices (most recent first)
+  tradeDetails: TradeDetail[];
+}
+
+interface TradeDetail {
+  eventTitle: string;
+  eventDate: string | null;
+  entry: number;              // 0-1 decimal
+  side: string;
+  result: string;             // "win" or "loss"
+  pnlCents: number;
+}
+```
 
 ### P&L Page (`/pnl`)
 
@@ -732,6 +831,7 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 |-------|--------|---------|
 | `/api/settlement/check` | GET | Check if markets have settled |
 | `/api/analytics/performance` | GET | Aggregate performance analytics |
+| `/api/analytics/trade-analytics` | GET | Per-word trade analytics grouped by speaker. Returns resolved trades aggregated by word with edge calculations, individual entries, and expandable trade details. Supports "All" aggregation across speakers |
 | `/api/ws/prices` | GET | WebSocket proxy for live Kalshi prices |
 
 ---
