@@ -144,6 +144,7 @@ export async function GET() {
 
         return {
           word: w.word,
+          speakerName: w.speakerName,
           side: w.sides.size === 1 ? [...w.sides][0] : "mixed",
           trades: w.trades,
           avgEntry: Math.round(avgEntry * 1000) / 1000,
@@ -185,37 +186,9 @@ export async function GET() {
   }
   speakerResults.sort((a, b) => a.speakerName.localeCompare(b.speakerName));
 
-  // "All" aggregate
+  // "All" aggregate — keep per-speaker word rows so each row retains its speakerName
   const allWordAggs = [...wordAggs.values()];
-  // Re-aggregate by word across all speakers
-  const allByWord = new Map<string, WordAgg>();
-  for (const agg of allWordAggs) {
-    const key = agg.word.toLowerCase();
-    const existing = allByWord.get(key) ?? {
-      word: agg.word,
-      speakerId: "all",
-      speakerName: "All",
-      trades: 0,
-      wins: 0,
-      losses: 0,
-      totalEntry: 0,
-      totalPnlCents: 0,
-      entries: [] as number[],
-      sides: new Set<string>(),
-      tradeDetails: [] as WordAgg["tradeDetails"],
-    };
-    existing.trades += agg.trades;
-    existing.wins += agg.wins;
-    existing.losses += agg.losses;
-    existing.totalEntry += agg.totalEntry;
-    existing.totalPnlCents += agg.totalPnlCents;
-    existing.entries.push(...agg.entries);
-    for (const s of agg.sides) existing.sides.add(s);
-    existing.tradeDetails.push(...agg.tradeDetails);
-    allByWord.set(key, existing);
-  }
-
-  const allAggregate = formatSpeaker("all", "All", [...allByWord.values()]);
+  const allAggregate = formatSpeaker("all", "All", allWordAggs);
 
   return NextResponse.json({
     speakers: speakerResults,

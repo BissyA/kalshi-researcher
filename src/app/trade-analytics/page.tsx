@@ -13,6 +13,7 @@ interface TradeDetail {
 
 interface WordRow {
   word: string;
+  speakerName: string;
   side: string;
   trades: number;
   avgEntry: number;
@@ -163,6 +164,11 @@ export default function TradeAnalyticsPage() {
                 <th className="px-4 py-3 text-left text-zinc-400 font-medium">
                   Word
                 </th>
+                {selectedSpeaker === "all" && (
+                  <th className="px-4 py-3 text-left text-zinc-400 font-medium">
+                    Speaker
+                  </th>
+                )}
                 <th className="px-4 py-3 text-left text-zinc-400 font-medium">
                   Side
                 </th>
@@ -184,17 +190,18 @@ export default function TradeAnalyticsPage() {
               </tr>
             </thead>
             <tbody>
-              {words.map((w) => {
-                const isExpanded = expandedWords.has(w.word);
+              {words.map((w, idx) => {
+                const rowKey = `${w.speakerName}|${w.word}|${idx}`;
+                const isExpanded = expandedWords.has(rowKey);
                 return (
-                  <React.Fragment key={w.word}>
+                  <React.Fragment key={rowKey}>
                     <tr
                       className="border-b border-zinc-800/50 cursor-pointer hover:bg-zinc-800/30 transition-colors"
                       onClick={() => {
                         setExpandedWords((prev) => {
                           const next = new Set(prev);
-                          if (next.has(w.word)) next.delete(w.word);
-                          else next.add(w.word);
+                          if (next.has(rowKey)) next.delete(rowKey);
+                          else next.add(rowKey);
                           return next;
                         });
                       }}
@@ -212,6 +219,9 @@ export default function TradeAnalyticsPage() {
                       <td className="px-4 py-3 text-white font-medium">
                         {w.word}
                       </td>
+                      {selectedSpeaker === "all" && (
+                        <td className="px-4 py-3 text-zinc-400">{w.speakerName}</td>
+                      )}
                       <td className="px-4 py-3">
                         <span
                           className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
@@ -264,7 +274,7 @@ export default function TradeAnalyticsPage() {
                     </tr>
                     {isExpanded && (
                       <tr>
-                        <td colSpan={8} className="p-0">
+                        <td colSpan={selectedSpeaker === "all" ? 9 : 8} className="p-0">
                           <div className="bg-zinc-950 border-t border-zinc-800/50 px-8 py-3">
                             <table className="w-full text-xs">
                               <thead>

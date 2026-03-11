@@ -167,7 +167,8 @@ kalshi-research/
 │       ├── 007_corpus_categories.sql # events.category, research_runs.corpus_category
 │       ├── 008_recent_recordings.sql # research_runs.recent_recordings_result JSONB
 │       ├── 009_event_notes.sql       # events.pre_event_notes, events.post_event_notes
-│       └── 010_total_cost_real.sql   # trades.total_cost_cents INTEGER → REAL (sub-cent precision)
+│       ├── 010_total_cost_real.sql   # trades.total_cost_cents INTEGER → REAL (sub-cent precision)
+│       └── 011_series_ticker_per_speaker.sql  # UNIQUE(series_ticker) → UNIQUE(series_ticker, speaker_id)
 ├── docs/
 │   └── kalshi-openapi.yaml           # Full Kalshi OpenAPI spec
 ├── Dockerfile                        # Multi-stage Node 22 Alpine build
@@ -219,7 +220,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 | `trades` | Logged trades | `event_id`, `word_id`, `side`, `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL — supports sub-cent precision), `result`, `pnl_cents` |
 | `event_results` | Settlement outcomes per word | `event_id`, `word_id`, `was_mentioned` |
 | `speakers` | Registered speakers for corpus | `name` |
-| `series` | Kalshi series linked to speakers | `speaker_id`, `series_ticker`, `excluded_tickers` |
+| `series` | Kalshi series linked to speakers — one row per (ticker, speaker) pair | `speaker_id`, `series_ticker`, `display_name`, `excluded_tickers`. Unique constraint is `UNIQUE(series_ticker, speaker_id)` — the same Kalshi series (e.g. `KXMENTION`) can be added for multiple speakers independently |
 
 ### Views
 
@@ -228,7 +229,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 
 ### Migrations
 
-All 10 migrations (001-010) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
+All 11 migrations (001-011) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
 
 ```bash
 curl -s -X POST "https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query" \
@@ -387,6 +388,8 @@ Three tabs: **Research**, **Sources**, **Trade Log**
 - Quick analysis tools
 - Category-based filtering
 
+**Multi-speaker series (e.g. KXMENTION):** Kalshi sometimes places multiple speakers under the same series ticker. The corpus handles this by allowing the same `series_ticker` to be added separately for each speaker (unique constraint is on `(series_ticker, speaker_id)`, not just `series_ticker`). Each speaker gets their own independent `series` row and their own set of imported events. After importing, events not belonging to the target speaker can be deleted from that series row without affecting the other speaker's series.
+
 ### Analytics Page (`/analytics`)
 
 - Overall stats: total trades, wins, losses, win rate, total P&L, expected value
@@ -399,7 +402,8 @@ Per-word trade performance analysis, designed to evaluate edge at the word level
 
 **Speaker Filter:**
 - Dropdown selector at the top to filter by individual speakers or "All Speakers" (aggregates across all speakers)
-- "All" re-aggregates word-level data across speakers (same word from different speakers merges into one row)
+- "All" shows every per-speaker word row across all speakers — the same word may appear multiple times if it was traded for different speakers (e.g. "China" traded for both Trump and Biden appear as two separate rows, each with their own speaker name). This is intentional: merging would hide speaker-level performance differences.
+- Individual speaker views show only that speaker's word rows, with no Speaker column
 
 **Summary Cards (6 boxes at top):**
 - Total Trades — count of resolved trades
@@ -413,15 +417,18 @@ Per-word trade performance analysis, designed to evaluate edge at the word level
 
 Sorted by P&L descending (highest profit words at top). Columns:
 
-| Column | Description |
-|--------|-------------|
-| Word | The word/phrase traded |
-| Side | YES/NO badge (green/red). Shows "mixed" if both sides traded |
-| # Trades | Number of resolved trades for this word |
-| Avg Entry | Average entry price in cents. **Hover tooltip** shows all individual entries horizontally (e.g. "72¢, 15¢, 30¢") sorted most recent first — important for spotting if the average masks wide variation |
-| Win Rate | Combined format: percentage + W/L record, e.g. `67% (2W / 1L)`. Fixed-width formatting for vertical alignment. Normal text color (not green/red) |
-| Edge | `Win Rate - Avg Entry`. Green if positive (paying less than win rate), red if negative (overpaying). This is the core metric — positive edge means profitable long-term |
-| P&L | Dollar P&L, green/red colored |
+| Column | Description | Shown when |
+|--------|-------------|------------|
+| Word | The word/phrase traded | Always |
+| Speaker | Name of the speaker this word belongs to | **"All Speakers" tab only** — hidden on individual speaker views |
+| Side | YES/NO badge (green/red). Shows "mixed" if both sides traded | Always |
+| # Trades | Number of resolved trades for this word | Always |
+| Avg Entry | Average entry price in cents. **Hover tooltip** shows all individual entries horizontally (e.g. "72¢, 15¢, 30¢") sorted most recent first — important for spotting if the average masks wide variation | Always |
+| Win Rate | Combined format: percentage + W/L record, e.g. `67% (2W / 1L)`. Fixed-width formatting for vertical alignment. Normal text color (not green/red) | Always |
+| Edge | `Win Rate - Avg Entry`. Green if positive (paying less than win rate), red if negative (overpaying). This is the core metric — positive edge means profitable long-term | Always |
+| P&L | Dollar P&L, green/red colored | Always |
+
+The `colSpan` on expandable sub-table rows adjusts dynamically: 9 columns when Speaker column is visible ("All" mode), 8 columns otherwise.
 
 **Expandable Word Rows:**
 - Click any word row to expand and see individual trade details
@@ -437,9 +444,13 @@ Sorted by P&L descending (highest profit words at top). Columns:
 
 **Data Source:**
 - Only uses **resolved** trades (where `result` is not null)
-- Groups trades by speaker → word (normalized to lowercase for grouping)
+- Groups trades by `speakerId|wordNormalized` key (one row per speaker+word combination)
 - Fetches from `trades`, `words`, `events`, and `speakers` tables
 - Entries array is sorted by `created_at` descending (most recent first) for the hover tooltip
+
+**"All" aggregation:** Does **not** merge same words across speakers. The `all` result set is the union of all per-speaker word rows, preserving individual `speakerName` on each row. This means the same word (e.g. "China") appears as separate rows if it was traded for multiple speakers. The summary cards (total trades, wins, wins rate, P&L, EV) are still aggregated across everything.
+
+**Expandable row key:** Uses `${speakerName}|${word}|${index}` as the React key and expand/collapse key to handle duplicate word names across speakers in "All" mode.
 
 **API:** `GET /api/analytics/trade-analytics`
 
@@ -467,6 +478,7 @@ interface SpeakerData {
 
 interface WordRow {
   word: string;
+  speakerName: string;        // Speaker name (e.g. "Trump", "Biden") — always present, used to render the Speaker column in "All" mode
   side: string;               // "yes", "no", or "mixed"
   trades: number;
   avgEntry: number;           // 0-1 decimal
@@ -807,7 +819,7 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/corpus/speakers` | GET/POST | List or create speakers |
-| `/api/corpus/series` | GET/POST | List or create series (link Kalshi series to speakers) |
+| `/api/corpus/series` | GET/POST | List or create series (link Kalshi series to speakers). POST returns 409 if the `(series_ticker, speaker_id)` pair already exists — same ticker can be added for multiple speakers |
 | `/api/corpus/series/events` | GET | Get events in a series |
 | `/api/corpus/categories` | GET | Get corpus categories for a speaker |
 | `/api/corpus/import-historical` | POST | Bulk import historical events from Kalshi |
@@ -979,6 +991,7 @@ All migrations are in `supabase/migrations/` and have been applied to the live d
 | 008 | `008_recent_recordings.sql` | `research_runs.recent_recordings_result JSONB` |
 | 009 | `009_event_notes.sql` | `events.pre_event_notes TEXT`, `events.post_event_notes TEXT` |
 | 010 | `010_total_cost_real.sql` | `trades.total_cost_cents` changed from `INTEGER` to `REAL` for sub-cent precision |
+| 011 | `011_series_ticker_per_speaker.sql` | Changed `series.series_ticker` uniqueness from global `UNIQUE` to `UNIQUE(series_ticker, speaker_id)`. Fixes: Kalshi series like `KXMENTION` that cover multiple speakers can now be added independently per speaker. Previously, adding the same ticker for a second speaker would throw a 409 "already exists" error. |
 
 To apply new migrations, use the Supabase Management API (never ask the user to do it manually):
 
@@ -1168,6 +1181,15 @@ The `/api/events/load` route saves **all markets** returned by the Kalshi API fo
 - Users need to log trades for events that have already ended
 - The word list is needed for `QuickTradeTable` to render in the Trade Log tab
 - Settled markets still have valid ticker and word data even without live prices
+
+### Multi-Speaker Kalshi Series (KXMENTION et al.)
+
+Some Kalshi series cover multiple speakers under one ticker (e.g. `KXMENTION` includes events for any speaker who might be mentioned). The corpus handles this with a per-`(speaker_id, series_ticker)` uniqueness model:
+
+- **One `series` row per (speaker, ticker) pair** — `KXMENTION` for Gavin Newsom and `KXMENTION` for Pete Hegseth are separate rows with independent event sets.
+- **Workflow:** Add the series for a speaker → import historical events → delete events that belong to other speakers from that series row. Each speaker's row is independent, so deleting events from one does not affect the other.
+- **Unique constraint:** `UNIQUE(series_ticker, speaker_id)` (migration 011). The old global `UNIQUE(series_ticker)` constraint caused a false 409 "already exists" error when attempting to add the same ticker for a second speaker.
+- **`excluded_tickers` column** (`TEXT[]` on `series`, migration 006) — an earlier mechanism for filtering out specific sub-tickers from a multi-speaker series. Still present but the primary workflow is now to delete non-relevant events after import.
 
 ### Dead Code Policy
 
