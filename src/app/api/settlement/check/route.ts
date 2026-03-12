@@ -19,14 +19,15 @@ export async function POST(request: Request) {
 
     const supabase = getServerSupabase();
 
-    // Find unsettled events
+    // Find events to check — skip completed unless a specific eventId is given
     let eventsQuery = supabase
       .from("events")
-      .select("id, title, kalshi_event_ticker, status")
-      .neq("status", "completed");
+      .select("id, title, kalshi_event_ticker, status");
 
     if (eventId) {
       eventsQuery = eventsQuery.eq("id", eventId);
+    } else {
+      eventsQuery = eventsQuery.neq("status", "completed");
     }
 
     const { data: events, error: eventsError } = await eventsQuery;

@@ -26,7 +26,6 @@ interface ResolveEventProps {
 export function ResolveEvent({
   trades,
   words,
-  eventResults,
   isResolved,
   mentionResults,
   onMentionResultsChange,
@@ -48,15 +47,13 @@ export function ResolveEvent({
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-white">Resolve Event</h2>
         <div className="flex items-center gap-2">
-          {!isResolved && (
-            <button
-              onClick={onCheckSettlement}
-              disabled={checkingSettlement}
-              className="px-3 py-1 text-sm bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 text-white rounded-lg transition-colors"
-            >
-              {checkingSettlement ? "Checking..." : "Check Settlement"}
-            </button>
-          )}
+          <button
+            onClick={onCheckSettlement}
+            disabled={checkingSettlement}
+            className="px-3 py-1 text-sm bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 text-white rounded-lg transition-colors"
+          >
+            {checkingSettlement ? "Checking..." : isResolved ? "Re-check Settlement" : "Check Settlement"}
+          </button>
           {!isResolved && (
             <button
               onClick={onToggleResolvePanel}
@@ -69,7 +66,7 @@ export function ResolveEvent({
       </div>
 
       {/* Settlement status feedback */}
-      {settlementStatus && !isResolved && (
+      {settlementStatus && (
         <div
           className={`text-sm px-4 py-3 rounded-lg ${
             settlementStatus.settled

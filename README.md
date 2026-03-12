@@ -96,7 +96,7 @@ kalshi-research/
 │   │       │   ├── [id]/route.ts     # GET/DELETE — single transcript
 │   │       │   └── [id]/download/route.ts # GET — download transcript
 │   │       ├── settlement/
-│   │       │   └── check/route.ts    # GET — check market settlement
+│   │       │   └── check/route.ts    # POST — check/re-check market settlement
 │   │       └── ws/
 │   │           └── prices/route.ts   # GET — WebSocket proxy for live prices
 │   ├── agents/                       # AI research agents
@@ -122,7 +122,7 @@ kalshi-research/
 │   │   │   ├── QuickTradeTable.tsx   # Standalone trade table for logging trades without research (uses words list)
 │   │   │   ├── LoggedTrades.tsx      # Trade log with delete (shown in both Research tab when settled + Trade Log tab)
 │   │   │   ├── RunHistory.tsx        # Research run history
-│   │   │   ├── ResolveEvent.tsx      # Mark event results (mentioned/not mentioned)
+│   │   │   ├── ResolveEvent.tsx      # Settlement controls + manual resolve + P&L summary
 │   │   │   ├── ProgressMessages.tsx  # Research progress indicator
 │   │   │   ├── SourcesTab.tsx        # Sources/transcripts tab
 │   │   │   ├── TabNavigation.tsx     # Tab switcher (Research, Sources, Trade Log)
@@ -377,7 +377,7 @@ Three tabs: **Research**, **Sources**, **Trade Log**
 - `QuickTradeTable` — Lightweight trade table showing all words with live prices, search, sorting, and the same inline trade form (side/price/contracts/editable cost). Uses `words` from Supabase (always available after event load), not `wordScores` (only available after research).
 - `WordScoresTable` — Full scores table with inline trade form for logging new trades (only shown when research has been run)
 - `LoggedTrades` — View logged trades with P&L after settlement, delete trades
-- `ResolveEvent` — Mark words as mentioned/not mentioned, trigger settlement
+- `ResolveEvent` — Settlement controls: "Check Settlement" / "Re-check Settlement" button (persists after resolution), "Manual Resolve" button (hidden after resolution), settlement status feedback, and P&L summary
 - Log trades with side, price, contracts, and editable total cost
 
 ### Corpus Page (`/corpus`)
@@ -865,7 +865,7 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/settlement/check` | GET | Check if markets have settled |
+| `/api/settlement/check` | POST | Check market settlement. Body: `{ eventId? }`. When `eventId` is provided, checks that specific event regardless of status (allows re-checking completed events). When omitted, only checks unsettled events (`status != 'completed'`). Auto-settles if all markets have results. |
 | `/api/analytics/performance` | GET | Aggregate performance analytics |
 | `/api/analytics/trade-analytics` | GET | Per-word trade analytics grouped by speaker. Returns resolved trades aggregated by word with edge calculations, individual entries, and expandable trade details. Supports "All" aggregation across speakers |
 | `/api/ws/prices` | GET | WebSocket proxy for live Kalshi prices |
@@ -1229,6 +1229,40 @@ Some Kalshi series cover multiple speakers under one ticker (e.g. `KXMENTION` in
 - **Workflow:** Add the series for a speaker → import historical events → delete events that belong to other speakers from that series row. Each speaker's row is independent, so deleting events from one does not affect the other.
 - **Unique constraint:** `UNIQUE(series_ticker, speaker_id)` (migration 011). The old global `UNIQUE(series_ticker)` constraint caused a false 409 "already exists" error when attempting to add the same ticker for a second speaker.
 - **`excluded_tickers` column** (`TEXT[]` on `series`, migration 006) — an earlier mechanism for filtering out specific sub-tickers from a multi-speaker series. Still present but the primary workflow is now to delete non-relevant events after import.
+
+### Settlement & Re-check Flow
+
+The settlement system allows checking market outcomes and resolving trades, with support for **re-checking after initial settlement** (e.g. when trades are added after the first settlement run).
+
+**How settlement works:**
+
+1. User clicks "Check Settlement" on the research page (`ResolveEvent` component)
+2. Frontend sends `POST /api/settlement/check` with `{ eventId }`
+3. API checks each word's market on Kalshi for settlement results (`GET /markets/{ticker}`)
+4. Words already in `event_results` table are skipped (marked `already_settled`)
+5. If ALL words have results and no API errors → auto-settles via `settleEvent()` in `src/lib/settlement.ts`
+6. `settleEvent()` upserts `event_results`, calculates win/loss and P&L for each trade, sets event status to `"completed"`
+
+**Re-check behavior:**
+
+- The "Check Settlement" button **persists** after resolution — it changes label to "Re-check Settlement"
+- The settlement status feedback message also persists (not gated by `isResolved`)
+- The "Manual Resolve" button hides after resolution (you shouldn't manually override Kalshi data)
+- The API route skips the `status != 'completed'` filter when a specific `eventId` is provided, so completed events can be re-checked
+- On re-check, words already in `event_results` are skipped. New words that weren't settled before (e.g. markets that settled later) will be picked up. The `settleEvent()` function uses upsert on `(event_id, word_id)`, so re-running is safe.
+- **Use case:** Log additional trades after initial settlement, then re-check to settle the new trades
+
+**Key state flow (research page):**
+
+```
+isResolved = eventResults.length > 0  // true after first settlement
+```
+
+- `ResolveEvent` receives `isResolved` as a prop
+- "Check Settlement" button: always visible (not gated by `!isResolved`)
+- "Manual Resolve" button: `{!isResolved && ...}` — hidden after resolution
+- Settlement status: always visible when present
+- P&L summary: `{isResolved && resolvedTrades.length > 0 && ...}` — shown after resolution
 
 ### Dead Code Policy
 
