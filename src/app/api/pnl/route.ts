@@ -2,14 +2,18 @@ import { NextResponse } from "next/server";
 import { kalshiFetch } from "@/lib/kalshi-client";
 import { getServerSupabase } from "@/lib/supabase";
 
+// Raw fill shape from Kalshi API (supports both pre- and post-maintenance formats)
+type RawFill = Record<string, unknown>;
+type RawSettlement = Record<string, unknown>;
+
 interface KalshiFill {
   fill_id: string;
   ticker: string;
   side: "yes" | "no";
   action: "buy" | "sell";
-  count: number;
-  yes_price: number;
-  no_price: number;
+  count: number;       // contracts (normalized to number)
+  yes_price: number;   // cents (normalized from dollars string if needed)
+  no_price: number;    // cents (normalized from dollars string if needed)
   fee_cost: string;
   created_time: string;
   is_taker: boolean;
@@ -19,13 +23,74 @@ interface KalshiSettlement {
   ticker: string;
   event_ticker?: string;
   market_result: "yes" | "no" | "void";
-  yes_count: number;
-  no_count: number;
+  yes_count: number;   // normalized to number
+  no_count: number;    // normalized to number
   yes_total_cost: number;
   no_total_cost: number;
   revenue: number;
   settled_time: string;
   fee_cost: string;
+}
+
+// Normalize a raw fill from the API into our internal KalshiFill format.
+// Kalshi renamed fields after their 2026-03-12 maintenance:
+//   count → count_fp (string)
+//   yes_price (cents int) → yes_price_dollars (dollar string)
+//   no_price  (cents int) → no_price_dollars  (dollar string)
+function normalizeFill(raw: RawFill): KalshiFill {
+  const count =
+    raw.count !== undefined
+      ? Number(raw.count)
+      : parseFloat((raw.count_fp as string) || "0");
+  const yes_price =
+    raw.yes_price !== undefined
+      ? Number(raw.yes_price)
+      : Math.round(parseFloat((raw.yes_price_dollars as string) || "0") * 100);
+  const no_price =
+    raw.no_price !== undefined
+      ? Number(raw.no_price)
+      : Math.round(parseFloat((raw.no_price_dollars as string) || "0") * 100);
+
+  return {
+    fill_id: raw.fill_id as string,
+    ticker: ((raw.ticker ?? raw.market_ticker) as string),
+    side: raw.side as "yes" | "no",
+    action: raw.action as "buy" | "sell",
+    count,
+    yes_price,
+    no_price,
+    fee_cost: (raw.fee_cost as string) || "0",
+    created_time: raw.created_time as string,
+    is_taker: raw.is_taker as boolean,
+  };
+}
+
+// Normalize a raw settlement from the API.
+// After the 2026-03-12 maintenance:
+//   yes_count (int) → yes_count_fp (string)
+//   no_count  (int) → no_count_fp  (string)
+function normalizeSettlement(raw: RawSettlement): KalshiSettlement {
+  const yes_count =
+    raw.yes_count !== undefined
+      ? Number(raw.yes_count)
+      : parseFloat((raw.yes_count_fp as string) || "0");
+  const no_count =
+    raw.no_count !== undefined
+      ? Number(raw.no_count)
+      : parseFloat((raw.no_count_fp as string) || "0");
+
+  return {
+    ticker: raw.ticker as string,
+    event_ticker: raw.event_ticker as string | undefined,
+    market_result: raw.market_result as "yes" | "no" | "void",
+    yes_count,
+    no_count,
+    yes_total_cost: Number(raw.yes_total_cost ?? 0),
+    no_total_cost: Number(raw.no_total_cost ?? 0),
+    revenue: Number(raw.revenue ?? 0),
+    settled_time: raw.settled_time as string,
+    fee_cost: (raw.fee_cost as string) || "0",
+  };
 }
 
 interface ProcessedTrade {
@@ -300,11 +365,16 @@ export async function GET(request: Request) {
     }
 
     // Fetch fills + settlements in parallel
-    const [portfolioFills, historicalFills, settlements] = await Promise.all([
-      fetchAllPaginated<KalshiFill>("/portfolio/fills", "fills"),
-      fetchAllPaginated<KalshiFill>("/historical/fills", "fills"),
-      fetchAllPaginated<KalshiSettlement>("/portfolio/settlements", "settlements"),
+    const [rawPortfolioFills, rawHistoricalFills, rawSettlements] = await Promise.all([
+      fetchAllPaginated<RawFill>("/portfolio/fills", "fills"),
+      fetchAllPaginated<RawFill>("/historical/fills", "fills"),
+      fetchAllPaginated<RawSettlement>("/portfolio/settlements", "settlements"),
     ]);
+
+    // Normalize to internal format (handles pre- and post-maintenance API field names)
+    const portfolioFills = rawPortfolioFills.map(normalizeFill);
+    const historicalFills = rawHistoricalFills.map(normalizeFill);
+    const settlements = rawSettlements.map(normalizeSettlement);
 
     // Deduplicate fills by fill_id
     const fillMap = new Map<string, KalshiFill>();

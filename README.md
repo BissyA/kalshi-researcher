@@ -20,6 +20,7 @@ AI-powered research platform for Kalshi **mention markets** — prediction marke
 12. [Running Locally](#running-locally)
 13. [Migrations](#migrations)
 14. [Important Patterns & Gotchas](#important-patterns--gotchas)
+15. [Known Kalshi API Breaking Changes](#known-kalshi-api-breaking-changes)
 
 ---
 
@@ -506,11 +507,34 @@ interface TradeDetail {
 Pulls data directly from Kalshi APIs (no CSV uploads needed). **Verified to match Kalshi's official P&L numbers to the penny** (as shown on Kalshi's Documents/Tax page).
 
 **Data Source:** The API route (`/api/pnl/route.ts`) fetches from three Kalshi endpoints in parallel:
-- `/portfolio/fills` — Current portfolio fill history
-- `/historical/fills` — Historical fill data (before the historical cutoff date)
+- `/portfolio/fills` — Current portfolio fill history (primary source of all fills post 2026-03-12 maintenance)
+- `/historical/fills` — Historical fill data (before the historical cutoff date; **returns empty array as of 2026-03-12** — all fills now served from `/portfolio/fills`)
 - `/portfolio/settlements` — Settlement results
 
 Fills are deduplicated by `fill_id` (historical and portfolio endpoints may overlap).
+
+**⚠️ Kalshi API Breaking Change — 2026-03-12 Maintenance:**
+
+After Kalshi's 2026-03-12 maintenance, the fill and settlement API responses were silently renamed:
+
+| Field (pre-maintenance) | Field (post-maintenance) | Notes |
+|---|---|---|
+| `count: number` | `count_fp: string` | e.g. `"34.00"` — parse with `parseFloat` |
+| `yes_price: number` (cents) | `yes_price_dollars: string` | e.g. `"0.9900"` — multiply by 100 for cents |
+| `no_price: number` (cents) | `no_price_dollars: string` | e.g. `"0.0100"` — multiply by 100 for cents |
+| `ticker: string` | `market_ticker: string` | `ticker` may still be present; fallback to `market_ticker` |
+| Settlement `yes_count: number` | `yes_count_fp: string` | e.g. `"0.00"` |
+| Settlement `no_count: number` | `no_count_fp: string` | e.g. `"1.00"` |
+
+The route handles this with `normalizeFill()` and `normalizeSettlement()` functions that read the new field names with fallback to the old ones, so the code is resilient to both formats. Both functions are defined near the top of `src/app/api/pnl/route.ts` and applied immediately after fetching raw data:
+
+```typescript
+const portfolioFills = rawPortfolioFills.map(normalizeFill);
+const historicalFills = rawHistoricalFills.map(normalizeFill);
+const settlements = rawSettlements.map(normalizeSettlement);
+```
+
+If Kalshi ever changes field names again, update `normalizeFill()` / `normalizeSettlement()` — all downstream logic (FIFO matching, settlement, fee calculation) continues to use the stable internal interface (`KalshiFill`, `KalshiSettlement`) with integer cents and numeric counts.
 
 **Kalshi Fill Model (CRITICAL — read before modifying P&L code):**
 
@@ -534,14 +558,14 @@ This means `action` is **completely irrelevant** for position tracking. The prev
    - NO position + market result YES → exit at 0¢ (loss)
 
 **Fee Handling:**
-- Each fill's `fee_cost` (string dollar amount, e.g. `"0.03"`) is converted to cents and tracked per position entry
+- Each fill's `fee_cost` (string dollar amount, e.g. `"0.03"`) is converted to cents and tracked per position entry. The `fee_cost` field name is **unchanged** across Kalshi API versions — the normalization layer does not touch it.
 - For offset matches (Phase 1), fees from both the YES and NO fills are summed
 - For settlements (Phase 2), only the original fill's fee is used — settlement has no additional close fee (confirmed via Kalshi CSV export where `close_fees=0` for settled positions)
 - The settlement's `fee_cost` field is an **aggregate** of all fees for that market (informational only), NOT an additional fee to add
 - When a fill is partially matched, fees are split proportionally with the remainder going to the last match (avoids rounding drift)
 
 **Position Validation:**
-- The API validates computed positions against settlement data (`settlement.yes_count` / `settlement.no_count`)
+- The API validates computed positions against settlement data (`settlement.yes_count` / `settlement.no_count`). These values are normalized from `yes_count_fp` / `no_count_fp` (strings) if the old integer fields are absent.
 - Any mismatches are returned in `diagnostics.positionMismatches` (should be empty if the fill model is correct)
 
 **5-minute server-side cache** with `?refresh=1` query param to bust cache.
@@ -1045,10 +1069,25 @@ When adding search to other tables, follow this same pattern for consistency.
 - **Two-phase FIFO matching:**
   1. Match offsetting YES vs NO positions per ticker (FIFO). P&L = `100 - yes_price - no_price` per contract
   2. Settle remaining single-side positions at 0 or 100 based on `market_result`
-- Prices in fills are in integer cents (0-100 scale)
-- Fee cost comes as a string dollar amount (e.g. `"0.03"`) — multiply by 100 for cents
+- After normalization, prices are always integer cents (0-100 scale). **Do not read raw API price fields directly** — always go through `normalizeFill()` which handles the post-2026-03-12 dollar-string format (`yes_price_dollars`) and the pre-maintenance integer-cents format (`yes_price`).
+- Fee cost comes as a string dollar amount in `fee_cost` (e.g. `"0.03"`) — multiply by 100 for cents. This field name is unchanged across API versions.
 - Settlement `fee_cost` is an aggregate total (informational), NOT an additional fee — do not add it to trade fees
-- Position counts are validated against `settlement.yes_count` / `settlement.no_count` — mismatches indicate a bug in fill processing
+- Position counts are validated against `settlement.yes_count` / `settlement.no_count` (after normalization from `yes_count_fp` / `no_count_fp`) — mismatches indicate a bug in fill processing
+
+**Normalizing Kalshi API fills (post-2026-03-12):**
+
+If the P&L shows $0.00 for all trades despite fees being non-zero, the most likely cause is a Kalshi API field rename. Inspect the raw response from `/portfolio/fills?limit=2` — if you see `count_fp` and `yes_price_dollars` instead of `count` and `yes_price`, update `normalizeFill()` in `src/app/api/pnl/route.ts` accordingly. The pattern is:
+
+```typescript
+// Read new field with fallback to old field name
+const count = raw.count !== undefined
+  ? Number(raw.count)
+  : parseFloat((raw.count_fp as string) || "0");
+
+const yes_price = raw.yes_price !== undefined
+  ? Number(raw.yes_price)
+  : Math.round(parseFloat((raw.yes_price_dollars as string) || "0") * 100);
+```
 
 ### Supabase
 
@@ -1196,3 +1235,47 @@ Some Kalshi series cover multiple speakers under one ticker (e.g. `KXMENTION` in
 - Unused components should be deleted, not left in the codebase
 - If a component is not imported anywhere, it is dead code and should be removed
 - The project previously had a `WordAnalysisTable.tsx` component that was never imported — it has been deleted
+
+---
+
+## Known Kalshi API Breaking Changes
+
+This section logs confirmed API changes that have broken the app, and how they were fixed. If the P&L dashboard shows $0.00 across the board after a Kalshi maintenance window, check this section first.
+
+### 2026-03-12 Maintenance — Fill & Settlement Field Rename
+
+**Symptoms observed:**
+- P&L overview showed `+$0.00` total profit and `+$0.00` profit after fees, but fees were non-zero (e.g. `$147.02`)
+- Calendar showed correct trade counts per day but all daily P&L as `+$0.00`
+- No error message — API calls succeeded (HTTP 200)
+
+**Root cause:**
+Kalshi renamed multiple fields in the `/portfolio/fills` and `/portfolio/settlements` responses without a deprecation period:
+
+| Old field | New field | Format change |
+|---|---|---|
+| `count: number` | `count_fp: string` | Integer → decimal string (`34` → `"34.00"`) |
+| `yes_price: number` | `yes_price_dollars: string` | Cents int → dollar string (`99` → `"0.9900"`) |
+| `no_price: number` | `no_price_dollars: string` | Cents int → dollar string (`1` → `"0.0100"`) |
+| `ticker: string` | `market_ticker: string` | Field renamed (ticker may still appear in some responses) |
+| Settlement `yes_count: number` | `yes_count_fp: string` | Integer → decimal string |
+| Settlement `no_count: number` | `no_count_fp: string` | Integer → decimal string |
+
+Additionally, `/historical/fills` began returning an empty `fills: []` array — all fills are now served exclusively from `/portfolio/fills`.
+
+**Fix applied:**
+Added `normalizeFill()` and `normalizeSettlement()` functions in `src/app/api/pnl/route.ts` (lines 40–94) that read new field names with fallback to old names. Raw API responses are normalized to the stable internal `KalshiFill` / `KalshiSettlement` interfaces before any P&L calculation. All downstream code is unchanged.
+
+**How to diagnose future API changes:**
+```bash
+# Test raw fill response format (replace with your signing logic or use the dev server debug endpoint)
+curl -s "https://api.elections.kalshi.com/trade-api/v2/portfolio/fills?limit=2" \
+  -H "KALSHI-ACCESS-KEY: ..." \
+  -H "KALSHI-ACCESS-TIMESTAMP: ..." \
+  -H "KALSHI-ACCESS-SIGNATURE: ..."
+
+# Or hit the built-in debug endpoint (dev server or deployed app):
+GET /api/pnl/debug
+```
+
+Check: do the raw fills have `count` (old) or `count_fp` (new)? Do they have `yes_price` (old) or `yes_price_dollars` (new)? Update `normalizeFill()` accordingly.
