@@ -16,6 +16,7 @@ interface TradeDetail {
   side: string;
   entryPrice: number;
   contracts: number;
+  totalCostCents: number | null;
   result: string | null;
   pnlCents: number;
   agentEdge: number | null;
@@ -231,10 +232,10 @@ export default function AnalyticsPage() {
                                       Contracts
                                     </th>
                                     <th className="px-3 py-2 text-left font-medium">
-                                      Mention Rate
+                                      Cost
                                     </th>
                                     <th className="px-3 py-2 text-left font-medium">
-                                      Edge
+                                      Mention Rate
                                     </th>
                                     <th className="px-3 py-2 text-left font-medium">
                                       Result
@@ -271,21 +272,13 @@ export default function AnalyticsPage() {
                                         {t.contracts}
                                       </td>
                                       <td className="px-3 py-2 text-zinc-400 font-mono">
-                                        {t.historicalRate != null
-                                          ? `${Math.round(t.historicalRate * 100)}%${t.mentionTotal != null ? ` (${t.mentionYes}/${t.mentionTotal})` : ""}`
+                                        {t.totalCostCents != null
+                                          ? `${(t.totalCostCents / 100).toFixed(2)}`
                                           : "-"}
                                       </td>
-                                      <td
-                                        className={`px-3 py-2 font-mono ${
-                                          t.historicalEdge != null && t.historicalEdge >= 0
-                                            ? "text-green-400"
-                                            : t.historicalEdge != null
-                                              ? "text-red-400"
-                                              : "text-zinc-400"
-                                        }`}
-                                      >
-                                        {t.historicalEdge != null
-                                          ? `${t.historicalEdge >= 0 ? "+" : ""}${(t.historicalEdge * 100).toFixed(1)}%`
+                                      <td className="px-3 py-2 text-zinc-400 font-mono">
+                                        {t.historicalRate != null
+                                          ? `${Math.round(t.historicalRate * 100)}%${t.mentionTotal != null ? ` (${t.mentionYes}/${t.mentionTotal})` : ""}`
                                           : "-"}
                                       </td>
                                       <td className="px-3 py-2">

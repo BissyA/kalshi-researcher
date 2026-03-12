@@ -17,8 +17,10 @@ interface WordRow {
   side: string;
   trades: number;
   avgEntry: number;
+  mentionRate: number | null;
+  mentionYes: number | null;
+  mentionTotal: number | null;
   winRate: number;
-  edge: number;
   wins: number;
   losses: number;
   pnlCents: number;
@@ -48,6 +50,7 @@ export default function TradeAnalyticsPage() {
   const [allData, setAllData] = useState<SpeakerData | null>(null);
   const [selectedSpeaker, setSelectedSpeaker] = useState<string>("all");
   const [expandedWords, setExpandedWords] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -156,6 +159,13 @@ export default function TradeAnalyticsPage() {
         <h2 className="text-lg font-semibold text-white">
           Per-Word Performance
         </h2>
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search words..."
+          className="w-full px-4 py-2 bg-zinc-900 border border-zinc-700 rounded-lg text-white text-sm placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+        />
         <div className="border border-zinc-800 rounded-lg overflow-hidden">
           <table className="w-full text-sm">
             <thead>
@@ -179,18 +189,21 @@ export default function TradeAnalyticsPage() {
                   Avg Entry
                 </th>
                 <th className="px-4 py-3 text-left text-zinc-400 font-medium">
-                  Win Rate
+                  Mention Rate
                 </th>
                 <th className="px-4 py-3 text-left text-zinc-400 font-medium">
-                  Edge
+                  Win Rate
                 </th>
                 <th className="px-4 py-3 text-left text-zinc-400 font-medium">
                   P&L
                 </th>
+                <th className="px-4 py-3 text-left text-zinc-400 font-medium">
+                  EV
+                </th>
               </tr>
             </thead>
             <tbody>
-              {words.map((w, idx) => {
+              {words.filter((w) => !search.trim() || w.word.toLowerCase().includes(search.trim().toLowerCase())).map((w, idx) => {
                 const rowKey = `${w.speakerName}|${w.word}|${idx}`;
                 const isExpanded = expandedWords.has(rowKey);
                 return (
@@ -250,6 +263,11 @@ export default function TradeAnalyticsPage() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-zinc-400 font-mono whitespace-nowrap">
+                        {w.mentionRate != null
+                          ? <><span className="inline-block w-10 text-right">{Math.round(w.mentionRate * 100)}%</span>{" "}<span className="text-zinc-500">({w.mentionYes}/{w.mentionTotal})</span></>
+                          : "-"}
+                      </td>
+                      <td className="px-4 py-3 text-zinc-400 font-mono whitespace-nowrap">
                         <span className="inline-block w-10 text-right">{Math.round(w.winRate * 100)}%</span>
                         {" "}
                         <span className="text-zinc-500">
@@ -258,23 +276,28 @@ export default function TradeAnalyticsPage() {
                       </td>
                       <td
                         className={`px-4 py-3 font-mono ${
-                          w.edge >= 0 ? "text-green-400" : "text-red-400"
-                        }`}
-                      >
-                        {w.edge >= 0 ? "+" : ""}
-                        {(w.edge * 100).toFixed(1)}%
-                      </td>
-                      <td
-                        className={`px-4 py-3 font-mono ${
                           w.pnlCents >= 0 ? "text-green-400" : "text-red-400"
                         }`}
                       >
                         ${(w.pnlCents / 100).toFixed(2)}
                       </td>
+                      <td className="px-4 py-3 font-mono font-semibold">
+                        {w.mentionRate != null && w.side !== "mixed"
+                          ? (() => {
+                              const trueProb = w.side === "yes" ? w.mentionRate : 1 - w.mentionRate;
+                              const isPositive = w.avgEntry < trueProb;
+                              return (
+                                <span className={isPositive ? "text-green-400" : "text-red-400"}>
+                                  {isPositive ? "+EV" : "-EV"}
+                                </span>
+                              );
+                            })()
+                          : "-"}
+                      </td>
                     </tr>
                     {isExpanded && (
                       <tr>
-                        <td colSpan={selectedSpeaker === "all" ? 9 : 8} className="p-0">
+                        <td colSpan={selectedSpeaker === "all" ? 10 : 9} className="p-0">
                           <div className="bg-zinc-950 border-t border-zinc-800/50 px-8 py-3">
                             <table className="w-full text-xs">
                               <thead>

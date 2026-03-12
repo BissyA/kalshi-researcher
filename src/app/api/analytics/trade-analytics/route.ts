@@ -42,6 +42,59 @@ export async function GET() {
     : { data: [] };
   const speakerNameMap = new Map((speakers ?? []).map((s) => [s.id, s.name]));
 
+  // ── Build historical mention rate maps per speaker ──
+  const speakerMentionRates = new Map<string, Map<string, { rate: number; yes: number; total: number }>>();
+
+  for (const spkId of speakerIds) {
+    const { data: seriesData } = await supabase
+      .from("series")
+      .select("id")
+      .eq("speaker_id", spkId);
+
+    const seriesIdList = (seriesData ?? []).map((s) => s.id);
+    if (seriesIdList.length === 0) continue;
+
+    const { data: corpusEvents } = await supabase
+      .from("events")
+      .select("id")
+      .in("series_id", seriesIdList);
+
+    const corpusEventIds = (corpusEvents ?? []).map((e) => e.id);
+    if (corpusEventIds.length === 0) continue;
+
+    const PAGE_SIZE = 1000;
+    let offset = 0;
+    const allResults: Array<{ was_mentioned: boolean; words: { word: string } }> = [];
+
+    while (true) {
+      const { data: page } = await supabase
+        .from("event_results")
+        .select("was_mentioned, words!inner(word)")
+        .in("event_id", corpusEventIds)
+        .range(offset, offset + PAGE_SIZE - 1);
+
+      if (!page || page.length === 0) break;
+      allResults.push(...(page as unknown as typeof allResults));
+      if (page.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+
+    const wordStats = new Map<string, { yes: number; total: number }>();
+    for (const r of allResults) {
+      const norm = r.words.word.toLowerCase();
+      const entry = wordStats.get(norm) ?? { yes: 0, total: 0 };
+      entry.total++;
+      if (r.was_mentioned) entry.yes++;
+      wordStats.set(norm, entry);
+    }
+
+    const rateMap = new Map<string, { rate: number; yes: number; total: number }>();
+    for (const [word, stats] of wordStats) {
+      rateMap.set(word, { rate: stats.total > 0 ? stats.yes / stats.total : 0, yes: stats.yes, total: stats.total });
+    }
+    speakerMentionRates.set(spkId, rateMap);
+  }
+
   // Only use resolved trades for analytics
   const resolvedTrades = allTrades.filter((t) => t.result !== null);
 
@@ -58,6 +111,9 @@ export async function GET() {
     totalPnlCents: number;
     entries: number[];
     sides: Set<string>;
+    mentionRate: number | null;
+    mentionYes: number | null;
+    mentionTotal: number | null;
     tradeDetails: { eventTitle: string; eventDate: string | null; entry: number; side: string; result: string; pnlCents: number }[];
   }
 
@@ -74,6 +130,7 @@ export async function GET() {
     const wordName = wordMap.get(trade.word_id) ?? "Unknown";
     const key = `${speakerId}|${wordName.toLowerCase()}`;
 
+    const mention = speakerMentionRates.get(speakerId)?.get(wordName.toLowerCase()) ?? null;
     const agg = wordAggs.get(key) ?? {
       word: wordName,
       speakerId,
@@ -85,6 +142,9 @@ export async function GET() {
       totalPnlCents: 0,
       entries: [] as number[],
       sides: new Set<string>(),
+      mentionRate: mention?.rate ?? null,
+      mentionYes: mention?.yes ?? null,
+      mentionTotal: mention?.total ?? null,
       tradeDetails: [] as WordAgg["tradeDetails"],
     };
 
@@ -140,7 +200,6 @@ export async function GET() {
       .map((w) => {
         const avgEntry = w.trades > 0 ? w.totalEntry / w.trades : 0;
         const wr = w.trades > 0 ? w.wins / w.trades : 0;
-        const edge = wr - avgEntry;
 
         return {
           word: w.word,
@@ -148,8 +207,10 @@ export async function GET() {
           side: w.sides.size === 1 ? [...w.sides][0] : "mixed",
           trades: w.trades,
           avgEntry: Math.round(avgEntry * 1000) / 1000,
+          mentionRate: w.mentionRate,
+          mentionYes: w.mentionYes,
+          mentionTotal: w.mentionTotal,
           winRate: Math.round(wr * 1000) / 1000,
-          edge: Math.round(edge * 1000) / 1000,
           wins: w.wins,
           losses: w.losses,
           pnlCents: w.totalPnlCents,

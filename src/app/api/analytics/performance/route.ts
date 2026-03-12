@@ -130,6 +130,7 @@ export async function GET() {
         side: t.side as string,
         entryPrice,
         contracts: t.contracts as number,
+        totalCostCents: t.total_cost_cents as number | null,
         result: t.result as string | null,
         pnlCents: (t.pnl_cents ?? 0) as number,
         agentEdge: t.agent_edge as number | null,
