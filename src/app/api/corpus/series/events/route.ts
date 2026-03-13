@@ -131,14 +131,25 @@ export async function DELETE(request: Request) {
     );
   }
 
-  // Cascade-delete the event's dependent records (same FK order as series DELETE)
-  await supabase.from("event_results").delete().eq("event_id", eventId);
-  await supabase.from("word_scores").delete().eq("event_id", eventId);
-  await supabase.from("trades").delete().eq("event_id", eventId);
-  await supabase.from("words").delete().eq("event_id", eventId);
-  await supabase.from("word_clusters").delete().eq("event_id", eventId);
-  await supabase.from("research_runs").delete().eq("event_id", eventId);
-  await supabase.from("events").delete().eq("id", eventId);
+  // Check if event has research runs or trades — if so, unlink instead of deleting
+  const [{ count: researchCount }, { count: tradeCount }] = await Promise.all([
+    supabase.from("research_runs").select("*", { count: "exact", head: true }).eq("event_id", eventId),
+    supabase.from("trades").select("*", { count: "exact", head: true }).eq("event_id", eventId),
+  ]);
+
+  if ((researchCount ?? 0) > 0 || (tradeCount ?? 0) > 0) {
+    // Preserve the event — just unlink from this series
+    await supabase.from("events").update({ series_id: null }).eq("id", eventId);
+  } else {
+    // Corpus-only event — safe to fully delete
+    await supabase.from("event_results").delete().eq("event_id", eventId);
+    await supabase.from("word_scores").delete().eq("event_id", eventId);
+    await supabase.from("trades").delete().eq("event_id", eventId);
+    await supabase.from("words").delete().eq("event_id", eventId);
+    await supabase.from("word_clusters").delete().eq("event_id", eventId);
+    await supabase.from("research_runs").delete().eq("event_id", eventId);
+    await supabase.from("events").delete().eq("id", eventId);
+  }
 
   // Add the ticker to the series excluded_tickers array
   const { data: series } = await supabase

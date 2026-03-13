@@ -147,6 +147,19 @@ export async function POST(request: Request) {
           eventDate = kalshiEvent.strike_date ?? settledMarkets[0]?.close_time ?? null;
         }
 
+        // Check if event already exists and belongs to a different series —
+        // if so, skip it to avoid claiming another speaker's event.
+        const { data: existingEvent } = await supabase
+          .from("events")
+          .select("id, series_id")
+          .eq("kalshi_event_ticker", kalshiEvent.event_ticker)
+          .maybeSingle();
+
+        if (existingEvent && existingEvent.series_id && existingEvent.series_id !== seriesId) {
+          // Event belongs to a different series — don't overwrite
+          continue;
+        }
+
         // Upsert event — speaker comes from the series record, NOT inferred
         const { data: dbEvent, error: eventError } = await supabase
           .from("events")
@@ -157,7 +170,7 @@ export async function POST(request: Request) {
               speaker: speakerName,
               event_type: eventType,
               event_date: eventDate,
-              series_id: seriesId,
+              series_id: existingEvent?.series_id ?? seriesId,
               status: "completed",
               updated_at: new Date().toISOString(),
             },

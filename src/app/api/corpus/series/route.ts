@@ -81,22 +81,50 @@ export async function DELETE(request: Request) {
 
   const supabase = getServerSupabase();
 
-  // First, delete all events linked to this series (cascades to words, event_results, etc.)
+  // Separate events into those safe to delete vs those with research/trades to preserve
   const { data: events } = await supabase
     .from("events")
     .select("id")
     .eq("series_id", id);
 
+  let eventsUnlinked = 0;
+
   if (events && events.length > 0) {
     const eventIds = events.map((e) => e.id);
-    // Delete in proper order to respect FK constraints
-    await supabase.from("event_results").delete().in("event_id", eventIds);
-    await supabase.from("word_scores").delete().in("event_id", eventIds);
-    await supabase.from("trades").delete().in("event_id", eventIds);
-    await supabase.from("words").delete().in("event_id", eventIds);
-    await supabase.from("word_clusters").delete().in("event_id", eventIds);
-    await supabase.from("research_runs").delete().in("event_id", eventIds);
-    await supabase.from("events").delete().in("id", eventIds);
+
+    // Find events that have research runs or trades — these must be preserved
+    const [{ data: researchEventIds }, { data: tradeEventIds }] = await Promise.all([
+      supabase.from("research_runs").select("event_id").in("event_id", eventIds),
+      supabase.from("trades").select("event_id").in("event_id", eventIds),
+    ]);
+
+    const preserveIds = new Set([
+      ...(researchEventIds ?? []).map((r) => r.event_id),
+      ...(tradeEventIds ?? []).map((t) => t.event_id),
+    ]);
+
+    const deleteIds = eventIds.filter((id) => !preserveIds.has(id));
+    const unlinkIds = eventIds.filter((id) => preserveIds.has(id));
+
+    // Unlink preserved events (set series_id to null) instead of deleting
+    if (unlinkIds.length > 0) {
+      await supabase
+        .from("events")
+        .update({ series_id: null })
+        .in("id", unlinkIds);
+      eventsUnlinked = unlinkIds.length;
+    }
+
+    // Delete corpus-only events (no research, no trades)
+    if (deleteIds.length > 0) {
+      await supabase.from("event_results").delete().in("event_id", deleteIds);
+      await supabase.from("word_scores").delete().in("event_id", deleteIds);
+      await supabase.from("trades").delete().in("event_id", deleteIds);
+      await supabase.from("words").delete().in("event_id", deleteIds);
+      await supabase.from("word_clusters").delete().in("event_id", deleteIds);
+      await supabase.from("research_runs").delete().in("event_id", deleteIds);
+      await supabase.from("events").delete().in("id", deleteIds);
+    }
   }
 
   // Then delete the series record itself
@@ -106,5 +134,5 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ success: true, eventsDeleted: events?.length ?? 0 });
+  return NextResponse.json({ success: true, eventsDeleted: (events?.length ?? 0) - eventsUnlinked, eventsUnlinked });
 }

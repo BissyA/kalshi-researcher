@@ -843,10 +843,10 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/corpus/speakers` | GET/POST | List or create speakers |
-| `/api/corpus/series` | GET/POST | List or create series (link Kalshi series to speakers). POST returns 409 if the `(series_ticker, speaker_id)` pair already exists — same ticker can be added for multiple speakers |
-| `/api/corpus/series/events` | GET | Get events in a series |
+| `/api/corpus/series` | GET/POST/DELETE | List, create, or delete series. POST returns 409 if the `(series_ticker, speaker_id)` pair already exists. DELETE cascade-deletes corpus-only events but **unlinks** (sets `series_id=null`) events that have research runs or trades — preserving all research/trade data. Returns `{ eventsDeleted, eventsUnlinked }` |
+| `/api/corpus/series/events` | GET/DELETE | Get events in a series, or exclude a single event. DELETE unlinks events with research/trades (sets `series_id=null`) instead of deleting them, adds ticker to `excluded_tickers` |
 | `/api/corpus/categories` | GET | Get corpus categories for a speaker |
-| `/api/corpus/import-historical` | POST | Bulk import historical events from Kalshi |
+| `/api/corpus/import-historical` | POST | Bulk import settled historical events from Kalshi for a series. Skips events that already belong to a different series (won't overwrite another speaker's ownership). Respects `excluded_tickers` array. Only imports events with `status: "settled"` |
 | `/api/corpus/mention-history` | GET | Get word mention history |
 | `/api/corpus/kalshi-series` | GET | Search Kalshi for series |
 | `/api/corpus/quick-prices` | GET | Quick market price lookup. Returns `yesBid`, `yesAsk`, `noAsk`, `lastPrice`, `volume` per market |
@@ -1230,6 +1230,29 @@ Some Kalshi series cover multiple speakers under one ticker (e.g. `KXMENTION` in
 - **Unique constraint:** `UNIQUE(series_ticker, speaker_id)` (migration 011). The old global `UNIQUE(series_ticker)` constraint caused a false 409 "already exists" error when attempting to add the same ticker for a second speaker.
 - **`excluded_tickers` column** (`TEXT[]` on `series`, migration 006) — an earlier mechanism for filtering out specific sub-tickers from a multi-speaker series. Still present but the primary workflow is now to delete non-relevant events after import.
 
+**Kalshi series ticker migration:** Kalshi has been consolidating speaker-specific series into the generic `KXMENTION` series. For example, Pete Hegseth events previously used the `KXHEGSETHMENTION` series (e.g. `KXHEGSETHMENTION-26MAR06`) but newer events use `KXMENTION` with a speaker prefix (e.g. `KXMENTION-HEGS26MAR13`). Both series remain in the DB for corpus completeness — `KXHEGSETHMENTION` covers historical events, and `KXMENTION` (linked to the same speaker) covers newer ones. This pattern may apply to other speakers over time.
+
+### Corpus Safety — Import & Delete Protections
+
+The corpus system has protections to prevent accidental data loss when importing or deleting series:
+
+**Problem (historical bug, now fixed):** When multiple speakers share the same Kalshi series ticker (e.g. `KXMENTION`), importing events for one speaker would overwrite the `series_id` on events that were manually loaded or belonged to a different speaker's series. Then, deleting that speaker's series would cascade-delete all those claimed events — destroying research runs, trades, and scores that the user had built up. This actually happened in production, causing loss of research and trade data for events that were "claimed" by an unrelated series import and then deleted with that series.
+
+**Protection 1 — Import won't claim other series' events** (`src/app/api/corpus/import-historical/route.ts`):
+- Before upserting, the import checks if the event already exists with a `series_id` belonging to a different series
+- If so, the event is **skipped** — the import does not overwrite another series' ownership
+- Events with `series_id = null` (manually loaded) are still claimed by the import, which is the expected behavior for corpus building
+
+**Protection 2 — Series delete preserves events with research/trades** (`src/app/api/corpus/series/route.ts`):
+- When deleting a series, events are split into two groups:
+  - **Corpus-only events** (no research runs, no trades) — fully deleted (cascade: event_results, word_scores, trades, words, word_clusters, research_runs, events)
+  - **Events with research or trades** — **unlinked** (`series_id` set to `null`) instead of deleted. All research, trades, and scores are preserved.
+- The response includes `eventsDeleted` and `eventsUnlinked` counts
+
+**Protection 3 — Single event exclude preserves events with research/trades** (`src/app/api/corpus/series/events/route.ts`):
+- Same logic as series delete: events with research_runs or trades are unlinked, not deleted
+- The event's ticker is still added to `excluded_tickers` to prevent re-import
+
 ### Settlement & Re-check Flow
 
 The settlement system allows checking market outcomes and resolving trades, with support for **re-checking after initial settlement** (e.g. when trades are added after the first settlement run).
@@ -1263,6 +1286,32 @@ isResolved = eventResults.length > 0  // true after first settlement
 - "Manual Resolve" button: `{!isResolved && ...}` — hidden after resolution
 - Settlement status: always visible when present
 - P&L summary: `{isResolved && resolvedTrades.length > 0 && ...}` — shown after resolution
+
+### Event Visibility Across Pages — Data Sources & Filtering
+
+Understanding which events appear on which page is critical. Each page has a different data source and filter:
+
+| Page | Data Source | What Events Appear | Key Query |
+|------|-------------|-------------------|-----------|
+| **Home** (`/`) | Supabase `events` table | Events with at least one `research_runs` row OR one `trades` row | `SELECT event_id FROM research_runs UNION SELECT event_id FROM trades` → fetch events by those IDs |
+| **Research** (`/research/[id]`) | Supabase | Any event by UUID (direct navigation) | `SELECT * FROM events WHERE id = :eventId` |
+| **Corpus** (`/corpus`) | Supabase | Events with `series_id` pointing to a series owned by the selected speaker | `SELECT * FROM events WHERE series_id IN (speaker's series IDs)` |
+| **Analytics** (`/analytics`) | Supabase `trades` table | Events that have at least one logged trade | `SELECT DISTINCT event_id FROM trades` → fetch events by those IDs |
+| **Trade Analytics** (`/trade-analytics`) | Supabase `trades` table | Events with resolved trades (`result IS NOT NULL`), grouped by speaker+word | Same as Analytics but grouped differently |
+| **P&L** (`/pnl`) | **Kalshi API** (not Supabase) | ALL events the user has traded on Kalshi, regardless of DB state | `/portfolio/fills` + `/historical/fills` + `/portfolio/settlements` from Kalshi API. Event titles resolved from Supabase first, then Kalshi API fallback |
+
+**Key implications:**
+- An event can appear on the **P&L page but nowhere else** if the user traded it on Kalshi but never loaded it into the app's database
+- An event must be **loaded via the home page** (or corpus import) to exist in Supabase
+- An event loaded but never researched or traded appears **nowhere** in the UI (except direct URL navigation to `/research/[id]`)
+- The P&L page is the **most complete** view because it uses Kalshi API as the source of truth
+- The Analytics and Trade Analytics pages **only show DB-logged trades**, not all Kalshi trades. There is no automatic sync between Kalshi fills and the `trades` table.
+
+**Two independent trade systems:**
+1. **DB trades** (`trades` table) — Manually logged by the user via the Trade Log tab. Used by: Home page list, Analytics, Trade Analytics, Research page settlement
+2. **Kalshi API fills** — The actual fills from the Kalshi exchange. Used by: P&L page only
+
+These two systems are **not synchronized**. A trade on Kalshi does not automatically create a row in the `trades` table. The user must manually log trades in the app for them to appear in Analytics/Trade Analytics.
 
 ### Dead Code Policy
 
