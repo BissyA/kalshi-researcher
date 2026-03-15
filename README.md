@@ -35,7 +35,7 @@ AI-powered research platform for Kalshi **mention markets** — prediction marke
 | AI | Anthropic Claude API (`@anthropic-ai/sdk` ^0.78.0) — Opus 4.6, Sonnet 4.5, Haiku 4.5 |
 | Charts | Recharts 3.7 |
 | Market Data | Kalshi REST API + WebSocket (`ws` ^8.19.0, RSA-PSS auth) |
-| Deployment | Fly.io (Docker, `sin` region) |
+| Deployment | Local-only (macOS Launch Agent, `localhost:3000`) |
 | Markdown | react-markdown ^10.1.0 + remark-gfm ^4.0.1 |
 
 ---
@@ -172,8 +172,9 @@ kalshi-research/
 │       └── 011_series_ticker_per_speaker.sql  # UNIQUE(series_ticker) → UNIQUE(series_ticker, speaker_id)
 ├── docs/
 │   └── kalshi-openapi.yaml           # Full Kalshi OpenAPI spec
-├── Dockerfile                        # Multi-stage Node 22 Alpine build
-├── fly.toml                          # Fly.io config (sin region, 512MB, port 3000)
+├── Dockerfile                        # Multi-stage Node 22 Alpine build (legacy — from previous Fly.io deployment)
+├── fly.toml                          # Fly.io config (legacy — app now runs locally via macOS Launch Agent)
+├── logs/                             # Launch Agent stdout/stderr logs (gitignored)
 ├── CLAUDE.md                         # AI builder instructions
 ├── package.json
 ├── tsconfig.json
@@ -953,12 +954,82 @@ const pnlCents = isWin
 
 ## Deployment
 
-### Fly.io
+### Local-Only (macOS Launch Agent)
 
-The app deploys to Fly.io using a multi-stage Docker build (Node 22 Alpine).
+The app runs **locally only** on `localhost:3000` — there is no cloud deployment. A macOS Launch Agent auto-starts the Next.js dev server on login and auto-restarts it if it crashes. No 24/7 uptime is needed; the app is available whenever the laptop is on.
+
+**Launch Agent plist:** `~/Library/LaunchAgents/com.kalshi.research.plist`
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kalshi.research</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/bisolaasolo/kalshi-research</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bisolaasolo/.nvm/versions/node/v22.15.1/bin/npm</string>
+        <string>run</string>
+        <string>dev</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/bisolaasolo/.nvm/versions/node/v22.15.1/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/bisolaasolo/kalshi-research/logs/launchd-out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bisolaasolo/kalshi-research/logs/launchd-err.log</string>
+</dict>
+</plist>
+```
+
+**How it works:**
+- **RunAtLoad: true** — starts `npm run dev` automatically when the user logs in
+- **KeepAlive: true** — if the process crashes or is killed, launchd restarts it automatically
+- **Logs** — stdout/stderr go to `logs/launchd-out.log` and `logs/launchd-err.log` in the project root
+- **Node path** — Uses the absolute nvm path (`v22.15.1`) to avoid shell profile issues with launchd (which doesn't source `.zshrc`/`.bashrc`)
+- **Port** — Runs on `localhost:3000` (the Next.js default)
+
+**Management commands:**
 
 ```bash
-# Deploy
+# Stop the dev server
+launchctl unload ~/Library/LaunchAgents/com.kalshi.research.plist
+
+# Start the dev server
+launchctl load ~/Library/LaunchAgents/com.kalshi.research.plist
+
+# Check if it's running
+lsof -iTCP:3000 -sTCP:LISTEN -P -n
+
+# View logs
+tail -f ~/kalshi-research/logs/launchd-err.log
+tail -f ~/kalshi-research/logs/launchd-out.log
+```
+
+**Important notes for AI builders:**
+- If you upgrade Node via nvm, you must update the absolute node/npm path in the plist file and reload the agent
+- The `logs/` directory is in the project root — add it to `.gitignore` if not already there
+- The Launch Agent only runs while the laptop is awake/logged in — there is no remote access or 24/7 uptime
+- Environment variables (API keys, etc.) are loaded from `.env.local` by Next.js, not from the plist
+
+### Legacy: Fly.io (Deprecated)
+
+The app was previously deployed to Fly.io. The `Dockerfile` and `fly.toml` remain in the repo but are **no longer in use**. The Fly.io deployment was removed to save costs since the app only needs to be accessible locally.
+
+**If you ever need to re-deploy to Fly.io:**
+
+```bash
+# Install flyctl, then:
 fly deploy
 
 # Set secrets
@@ -967,11 +1038,11 @@ fly secrets set KALSHI_API_KEY=... KALSHI_PRIVATE_KEY="..." \
   ANTHROPIC_API_KEY=...
 ```
 
-**Config (`fly.toml`):**
+**Legacy config (`fly.toml`):**
 - App name: `kalshi-research`
-- Region: `sin` (Singapore)
+- Region: `iad` (Virginia)
 - Internal port: 3000
-- VM: shared CPU, 512MB RAM
+- VM: shared CPU, 256MB RAM
 - Auto-stop/start enabled
 - Health check: GET `/` every 30s
 
@@ -981,8 +1052,12 @@ fly secrets set KALSHI_API_KEY=... KALSHI_PRIVATE_KEY="..." \
 
 ## Running Locally
 
+The app auto-starts via the macOS Launch Agent (see [Deployment](#deployment) above). Under normal use, you don't need to manually start anything — just open `http://localhost:3000` in your browser after login.
+
+**If you need to run manually (e.g. after unloading the Launch Agent):**
+
 ```bash
-# Install dependencies
+# Install dependencies (only needed after pulling new changes)
 npm install
 
 # Set up environment variables (add your keys to .env.local)
@@ -995,7 +1070,12 @@ npm run build
 npm start
 ```
 
-The dev server runs on port 3000 (or next available if occupied). Turbopack is enabled for fast HMR — component changes hot-reload without restarting.
+**Runtime details:**
+- Dev server runs on port **3000** via the Launch Agent (`npm run dev`)
+- Turbopack is enabled for fast HMR — component changes hot-reload without restarting
+- Node version: **v22.15.1** (managed via nvm)
+- Logs: `logs/launchd-out.log` and `logs/launchd-err.log` in the project root
+- If port 3000 is occupied by another process, the Launch Agent will fail silently — check `logs/launchd-err.log` for errors
 
 ---
 
