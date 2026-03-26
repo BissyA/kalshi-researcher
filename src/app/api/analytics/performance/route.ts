@@ -9,12 +9,14 @@ export async function GET() {
     .from("trades")
     .select("*");
 
-  // Resolved trades only (for W/L stats, P&L, edge analysis)
-  const resolvedTrades = allTrades?.filter((t) => t.result !== null) ?? [];
+  // Resolved BUY trades only (sells are informational — their P&L is on the matched buy)
+  const resolvedTrades = allTrades?.filter(
+    (t) => (t.action ?? "buy") === "buy" && t.result !== null
+  ) ?? [];
 
   const totalTrades = resolvedTrades.length;
   const wins = resolvedTrades.filter((t) => t.result === "win").length;
-  const losses = resolvedTrades.filter((t) => t.result === "loss").length;
+  const losses = resolvedTrades.length - wins;
   const totalPnlCents = resolvedTrades.reduce((sum, t) => sum + (t.pnl_cents ?? 0), 0);
   const winRate = totalTrades > 0 ? wins / totalTrades : 0;
 
@@ -109,10 +111,10 @@ export async function GET() {
 
   const eventPerformance = [];
   for (const event of events ?? []) {
-    const eventAllTrades = allTrades?.filter((t) => t.event_id === event.id) ?? [];
+    const eventAllTrades = allTrades?.filter((t) => t.event_id === event.id && (t.action ?? "buy") === "buy") ?? [];
     const eventResolved = eventAllTrades.filter((t) => t.result !== null);
     const eventWins = eventResolved.filter((t) => t.result === "win").length;
-    const eventLosses = eventResolved.filter((t) => t.result === "loss").length;
+    const eventLosses = eventResolved.length - eventWins;
     const eventPnl = eventResolved.reduce((sum, t) => sum + (t.pnl_cents ?? 0), 0);
 
     // Look up mention rates for this event's speaker

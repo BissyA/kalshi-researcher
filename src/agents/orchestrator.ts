@@ -380,6 +380,30 @@ export async function runResearchPipeline(
     totalOutputTokens += synthesisResult.outputTokens;
     totalCostCents += synthesisResult.estimatedCostCents;
 
+    // ── Recover briefing if the model wrote it outside the JSON ──
+    // Sometimes the model writes the full briefing as markdown before the JSON
+    // block, then uses a placeholder like "[Full markdown briefing text above]"
+    // inside the JSON briefing field. Detect and recover.
+    const briefingValue = synthesisResult.data.briefing ?? "";
+    const isPlaceholder = !briefingValue || briefingValue.length < 100 ||
+      briefingValue.toLowerCase().includes("briefing text above") ||
+      briefingValue.toLowerCase().includes("see above") ||
+      briefingValue.toLowerCase().includes("markdown above");
+
+    if (isPlaceholder && synthesisResult.content) {
+      // Extract the markdown briefing from the raw response text (before the JSON block)
+      const jsonStart = synthesisResult.content.indexOf("```json");
+      const rawJsonStart = jsonStart === -1 ? synthesisResult.content.indexOf('{"briefing"') : jsonStart;
+      if (rawJsonStart > 200) {
+        // There's substantial text before the JSON — that's likely the briefing
+        const preBriefing = synthesisResult.content.slice(0, rawJsonStart).trim();
+        if (preBriefing.length > 100) {
+          synthesisResult.data.briefing = preBriefing;
+          console.log(`[orchestrator] Recovered briefing from raw response (${preBriefing.length} chars)`);
+        }
+      }
+    }
+
     // ──────────────────────────────────────────────────────────────
     // Phase 4: Save results
     // ──────────────────────────────────────────────────────────────
@@ -446,14 +470,21 @@ export async function runResearchPipeline(
         console.error(`Failed to save score for "${score.word}":`, dbErr);
       }
     }
-    console.log(`Saved ${savedScores}/${wordScores.length} word scores`);
+    if (savedScores < wordScores.length) {
+      console.warn(`[orchestrator] Only saved ${savedScores}/${wordScores.length} word scores — some failed`);
+    }
 
     // Mark research run as completed
+    const finalBriefing = synthesisResult.data.briefing ?? null;
+    if (!finalBriefing || finalBriefing.length < 100) {
+      console.error(`[orchestrator] WARNING: Briefing is missing or suspiciously short (${finalBriefing?.length ?? 0} chars)`);
+    }
+
     await supabase.from("research_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
       synthesis_result: synthesisResult.data,
-      briefing: synthesisResult.data.briefing ?? null,
+      briefing: finalBriefing,
       total_input_tokens: totalInputTokens,
       total_output_tokens: totalOutputTokens,
       total_cost_cents: totalCostCents,
@@ -475,6 +506,8 @@ export async function runResearchPipeline(
 
     return {
       wordScores: wordScores,
+      savedScores,
+      briefingLength: finalBriefing?.length ?? 0,
       clusters: clusteringResult.data.clusters ?? [],
       eventFormat: {
         estimatedDurationMinutes: eventFormatResult.estimatedDurationMinutes,

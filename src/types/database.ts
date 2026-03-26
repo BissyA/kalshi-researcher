@@ -106,13 +106,18 @@ export interface DbTrade {
   event_id: string | null;
   word_id: string | null;
   side: "yes" | "no";
+  action: "buy" | "sell";
   entry_price: number;
   contracts: number;
   total_cost_cents: number;
   agent_estimated_probability: number | null;
   agent_edge: number | null;
-  result: "win" | "loss" | null;
+  result: "win" | "loss" | "sold" | null;
   pnl_cents: number | null;
+  exit_price: number | null;
+  matched_buy_ids: string[] | null;
+  matched_contracts: number;
+  realized_pnl_cents: number | null;
   created_at: string;
 }
 

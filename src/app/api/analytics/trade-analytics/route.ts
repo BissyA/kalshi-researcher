@@ -95,8 +95,10 @@ export async function GET() {
     speakerMentionRates.set(spkId, rateMap);
   }
 
-  // Only use resolved trades for analytics
-  const resolvedTrades = allTrades.filter((t) => t.result !== null);
+  // Only use resolved BUY trades for analytics (sell P&L is on the matched buy)
+  const resolvedTrades = allTrades.filter(
+    (t) => (t.action ?? "buy") === "buy" && t.result !== null
+  );
 
   // Group resolved trades by speaker → word
   // Key: speakerId|wordNormalized

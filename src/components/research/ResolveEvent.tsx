@@ -39,8 +39,9 @@ export function ResolveEvent({
 }: ResolveEventProps) {
   if (trades.length === 0 && !isResolved) return null;
 
-  const resolvedTrades = trades.filter((t) => t.result != null);
-  const totalPnl = resolvedTrades.reduce((s, t) => s + (t.pnl_cents ?? 0), 0);
+  // Only count buy trades for P&L summary (sell P&L is already in the matched buy's pnl_cents)
+  const resolvedBuys = trades.filter((t) => (t.action ?? "buy") === "buy" && t.result != null);
+  const totalPnl = resolvedBuys.reduce((s, t) => s + (t.pnl_cents ?? 0), 0);
 
   return (
     <div className="space-y-3">
@@ -125,7 +126,7 @@ export function ResolveEvent({
       )}
 
       {/* P&L Summary after resolution */}
-      {isResolved && resolvedTrades.length > 0 && (
+      {isResolved && resolvedBuys.length > 0 && (
         <div className="border border-zinc-800 rounded-lg bg-zinc-900/50 p-4">
           <div className="grid grid-cols-3 gap-4">
             <div>
@@ -141,19 +142,21 @@ export function ResolveEvent({
             <div>
               <p className="text-sm text-zinc-400">Win Rate</p>
               <p className="text-xl font-bold text-white">
-                {Math.round(
-                  (resolvedTrades.filter((t) => t.result === "win").length /
-                    resolvedTrades.length) *
-                    100
-                )}
+                {resolvedBuys.length > 0
+                  ? Math.round(
+                      (resolvedBuys.filter((t) => (t.pnl_cents ?? 0) >= 0).length /
+                        resolvedBuys.length) *
+                        100
+                    )
+                  : 0}
                 %
               </p>
             </div>
             <div>
               <p className="text-sm text-zinc-400">Trades</p>
               <p className="text-xl font-bold text-white">
-                {resolvedTrades.filter((t) => t.result === "win").length}W /{" "}
-                {resolvedTrades.filter((t) => t.result === "loss").length}L
+                {resolvedBuys.filter((t) => (t.pnl_cents ?? 0) >= 0).length}W /{" "}
+                {resolvedBuys.filter((t) => (t.pnl_cents ?? 0) < 0).length}L
               </p>
             </div>
           </div>

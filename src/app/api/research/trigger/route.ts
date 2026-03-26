@@ -286,8 +286,9 @@ export async function POST(request: Request) {
               }
             }
           }
-        } catch {
-          // Use default prices if Kalshi fetch fails
+        } catch (priceErr) {
+          console.warn("[trigger] Failed to fetch Kalshi prices, using defaults:", priceErr);
+          sendEvent({ type: "progress", status: "running", completedAgents: [], warning: "Could not fetch live Kalshi prices — using defaults (edge calculations may be inaccurate)" });
         }
 
         sendEvent({
@@ -306,12 +307,22 @@ export async function POST(request: Request) {
             }
           );
 
+          const warnings: string[] = [];
+          if (result.savedScores < (result.wordScores?.length ?? 0)) {
+            warnings.push(`Only ${result.savedScores}/${result.wordScores?.length} word scores saved`);
+          }
+          if (result.briefingLength < 100) {
+            warnings.push("Briefing is missing or incomplete");
+          }
+
           sendEvent({
             type: "completed",
             runId: researchRun.id,
             tokenUsage: result.tokenUsage,
             wordScoresCount: result.wordScores?.length ?? 0,
+            savedScoresCount: result.savedScores,
             clustersCount: result.clusters?.length ?? 0,
+            warnings: warnings.length > 0 ? warnings : undefined,
           });
         } catch (error) {
           sendEvent({

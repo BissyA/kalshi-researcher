@@ -269,6 +269,8 @@ export interface OrchestratorInput {
 
 export interface OrchestratorOutput {
   wordScores: SynthesisResult["wordScores"];
+  savedScores: number;
+  briefingLength: number;
   clusters: ClusterResult["clusters"];
   eventFormat: {
     estimatedDurationMinutes: number;

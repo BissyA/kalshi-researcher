@@ -81,7 +81,7 @@ export default function ResearchDashboard({
   const [trades, setTrades] = useState<Trade[]>([]);
   const [words, setWords] = useState<Word[]>([]);
   const [tradeFormWordId, setTradeFormWordId] = useState<string | null>(null);
-  const [tradeForm, setTradeForm] = useState({ side: "yes" as "yes" | "no", entryPrice: 0.5, contracts: 1, totalCost: 0.5 });
+  const [tradeForm, setTradeForm] = useState({ action: "buy" as "buy" | "sell", side: "yes" as "yes" | "no", entryPrice: 0.5, contracts: 1, totalCost: 0.5 });
   const [tradeLoading, setTradeLoading] = useState(false);
 
   // ── Resolution state ──
@@ -264,10 +264,13 @@ export default function ResearchDashboard({
                   `Completed: ${agents}${data.currentAgent ? ` | Running: ${data.currentAgent}` : ""}`,
                 ]);
               } else if (data.type === "completed") {
-                setProgressMessages((prev) => [
-                  ...prev,
+                const msgs = [
                   `Research complete! ${data.wordScoresCount} scores, ${data.clustersCount} clusters. Cost: ${data.tokenUsage?.estimatedCostCents}¢`,
-                ]);
+                ];
+                if (data.warnings?.length > 0) {
+                  msgs.push(`⚠️ ${data.warnings.join(" | ")}`);
+                }
+                setProgressMessages((prev) => [...prev, ...msgs]);
               } else if (data.type === "error") {
                 setProgressMessages((prev) => [...prev, `Error: ${data.error}`]);
               }
@@ -282,7 +285,10 @@ export default function ResearchDashboard({
     }
 
     setResearchRunning(false);
-    fetchData();
+    await fetchData();
+    // Show the research output after run completes
+    setActiveTab("research");
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function stopRun(runId: string) {
@@ -311,6 +317,7 @@ export default function ResearchDashboard({
         body: JSON.stringify({
           eventId,
           wordId,
+          action: tradeForm.action,
           side: tradeForm.side,
           entryPrice: tradeForm.entryPrice,
           contracts: tradeForm.contracts,
@@ -320,9 +327,12 @@ export default function ResearchDashboard({
       if (res.ok) {
         setTradeFormWordId(null);
         fetchData();
+      } else {
+        const data = await res.json().catch(() => null);
+        alert(data?.error ?? "Failed to log trade");
       }
     } catch {
-      // silently fail
+      alert("Network error logging trade");
     }
     setTradeLoading(false);
   }

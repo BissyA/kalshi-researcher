@@ -165,6 +165,8 @@ KEY PRINCIPLES FOR TRADE CONSTRUCTION:
 
 IMPORTANT: Include the trade recommendations as a dedicated section in your briefing markdown AFTER the word analysis section, using the heading "## Trade Recommendations ($100 Budget)". Format it as a readable table and commentary. The structured JSON tradeRecommendations field should contain the same information in machine-readable form.
 
+CRITICAL: Return your entire response as a SINGLE JSON object. The "briefing" field MUST contain the COMPLETE briefing text as an inline JSON string with \\n for newlines. Do NOT write the briefing separately before the JSON — it MUST be embedded inside the JSON "briefing" field. If the briefing is not inside the JSON, the trader will never see it.
+
 Return structured JSON in this exact format:
 \`\`\`json
 {

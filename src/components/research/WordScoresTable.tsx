@@ -2,6 +2,7 @@ import type { WordScore, Cluster, Trade, SortKey, PriceData } from "@/types/comp
 import { edgeColor, confBadge } from "@/lib/ui-utils";
 
 interface TradeForm {
+  action: "buy" | "sell";
   side: "yes" | "no";
   entryPrice: number;
   contracts: number;
@@ -241,6 +242,7 @@ export function WordScoresTable({
                           const price = livePrice ?? score.market_yes_price ?? 0.5;
                           const rounded = Math.round(price * 100) / 100;
                           onTradeFormChange({
+                            action: "buy",
                             side: "yes",
                             entryPrice: rounded,
                             contracts: 1,
@@ -259,6 +261,32 @@ export function WordScoresTable({
                           className="mt-2 p-3 bg-zinc-900 border border-zinc-700 rounded space-y-2"
                           onClick={(e) => e.stopPropagation()}
                         >
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() =>
+                                onTradeFormChange({ ...tradeForm, action: "buy" })
+                              }
+                              className={`flex-1 py-1 rounded text-xs font-medium ${
+                                tradeForm.action === "buy"
+                                  ? "bg-blue-600 text-white"
+                                  : "bg-zinc-800 text-zinc-400"
+                              }`}
+                            >
+                              BUY
+                            </button>
+                            <button
+                              onClick={() =>
+                                onTradeFormChange({ ...tradeForm, action: "sell" })
+                              }
+                              className={`flex-1 py-1 rounded text-xs font-medium ${
+                                tradeForm.action === "sell"
+                                  ? "bg-amber-600 text-white"
+                                  : "bg-zinc-800 text-zinc-400"
+                              }`}
+                            >
+                              SELL
+                            </button>
+                          </div>
                           <div className="flex gap-2">
                             <button
                               onClick={() =>
@@ -287,7 +315,7 @@ export function WordScoresTable({
                           </div>
                           <div className="grid grid-cols-3 gap-2">
                             <div>
-                              <label className="text-xs text-zinc-500">Price</label>
+                              <label className="text-xs text-zinc-500">{tradeForm.action === "sell" ? "Exit Price" : "Price"}</label>
                               <input
                                 type="number"
                                 step="0.001"
@@ -348,7 +376,7 @@ export function WordScoresTable({
                               disabled={tradeLoading}
                               className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 text-white text-xs rounded"
                             >
-                              {tradeLoading ? "..." : "Log Trade"}
+                              {tradeLoading ? "..." : tradeForm.action === "sell" ? "Log Sell" : "Log Trade"}
                             </button>
                           </div>
                         </div>

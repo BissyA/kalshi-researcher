@@ -170,7 +170,9 @@ export async function callAgent(options: AgentCallOptions): Promise<AgentCallRes
       (block): block is Anthropic.Messages.TextBlock => block.type === "text"
     );
     if (textBlocks.length > 0) {
-      finalTextContent = textBlocks.map((b) => b.text).join("\n");
+      // Accumulate text across continuations (don't overwrite)
+      const newText = textBlocks.map((b) => b.text).join("\n");
+      finalTextContent = finalTextContent ? finalTextContent + "\n" + newText : newText;
     }
 
     // Done — Claude finished naturally
@@ -184,7 +186,11 @@ export async function callAgent(options: AgentCallOptions): Promise<AgentCallRes
       continue;
     }
 
-    // Any other stop reason (max_tokens, etc.) — stop
+    // max_tokens — response was truncated
+    if (response.stop_reason === "max_tokens") {
+      console.error(`[claude-client] Response truncated (max_tokens=${maxTokens}, model=${model}). Output may be incomplete.`);
+    }
+
     break;
   }
 

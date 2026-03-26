@@ -49,6 +49,27 @@ export async function POST(request: Request) {
     const allResults = [];
 
     for (const event of events) {
+      // Refresh event_date from Kalshi sub_title (recurring events update this)
+      try {
+        const eventRes = await kalshiFetch("GET", `/events/${event.kalshi_event_ticker}`);
+        if (eventRes.ok) {
+          const eventData = await eventRes.json();
+          const subTitle = eventData.event?.sub_title;
+          if (subTitle) {
+            const cleaned = subTitle.replace(/^On\s+/i, "");
+            const parsed = new Date(cleaned);
+            if (!isNaN(parsed.getTime())) {
+              await supabase
+                .from("events")
+                .update({ event_date: parsed.toISOString() })
+                .eq("id", event.id);
+            }
+          }
+        }
+      } catch {
+        // non-critical, continue with settlement
+      }
+
       const { data: words } = await supabase
         .from("words")
         .select("id, word, kalshi_market_ticker")
@@ -156,10 +177,13 @@ export async function POST(request: Request) {
 
       // Auto-resolve if ALL words have results and no errors
       if (settledCount === words.length && failedCount === 0) {
-        const wordResults: WordResult[] = marketResults.map((mr) => ({
-          wordId: mr.wordId,
-          wasMentioned: mr.result === "yes",
-        }));
+        // Only include words that have a definitive result
+        const wordResults: WordResult[] = marketResults
+          .filter((mr) => mr.result === "yes" || mr.result === "no")
+          .map((mr) => ({
+            wordId: mr.wordId,
+            wasMentioned: mr.result === "yes",
+          }));
 
         const settlement = await settleEvent(event.id, wordResults);
         eventCheck.settled = true;

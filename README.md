@@ -74,9 +74,9 @@ kalshi-research/
 │   │       │   ├── route.ts          # GET — P&L from Kalshi fills + settlements (FIFO offset matching)
 │   │       │   └── debug/route.ts    # GET — P&L diagnostics (fill counts, theory validation)
 │   │       ├── trades/
-│   │       │   ├── log/route.ts      # POST — log a trade
+│   │       │   ├── log/route.ts      # POST — log a buy or sell trade (sell uses FIFO matching)
 │   │       │   ├── results/route.ts  # GET/POST — trade results & settlement
-│   │       │   └── [tradeId]/route.ts # DELETE — remove a logged trade
+│   │       │   └── [tradeId]/route.ts # DELETE/PATCH — delete or edit a trade (with sell-aware guards)
 │   │       ├── analytics/
 │   │       │   ├── performance/route.ts # GET — aggregate performance stats
 │   │       │   └── trade-analytics/route.ts # GET — per-word trade analytics by speaker
@@ -112,17 +112,17 @@ kalshi-research/
 │   ├── components/
 │   │   ├── research/                 # Research page components
 │   │   │   ├── WordTable.tsx         # Main word table — prices, historical rates, edge, search bar, expandable event details
-│   │   │   ├── WordScoresTable.tsx   # Detailed AI scores grid — probabilities, confidence, trade form, cluster filter
+│   │   │   ├── WordScoresTable.tsx   # Detailed AI scores grid — probabilities, confidence, trade form (buy/sell), cluster filter
 │   │   │   ├── ResearchNotes.tsx     # Pre/post event notes (auto-save, 800ms debounce)
 │   │   │   ├── ResearchBriefing.tsx  # AI-generated briefing + trade recommendations (markdown, rendered in Briefing tab)
 │   │   │   ├── AgentOutputAccordion.tsx # Expandable per-agent results
 │   │   │   ├── ClusterView.tsx       # Word cluster visualization
 │   │   │   ├── EventHeader.tsx       # Event metadata header
 │   │   │   ├── EventContext.tsx      # Event context panel (format, agenda, news cycle, trending topics)
-│   │   │   ├── QuickTradeTable.tsx   # Standalone trade table for logging trades without research (uses words list)
-│   │   │   ├── LoggedTrades.tsx      # Trade log with delete (shown in both Research tab when settled + Trade Log tab)
+│   │   │   ├── QuickTradeTable.tsx   # Standalone trade table for logging buy/sell trades without research (uses words list)
+│   │   │   ├── LoggedTrades.tsx      # Trade log with buy/sell display, P&L on buys only, delete with sell-unwind
 │   │   │   ├── RunHistory.tsx        # Research run history
-│   │   │   ├── ResolveEvent.tsx      # Settlement controls + manual resolve + P&L summary
+│   │   │   ├── ResolveEvent.tsx      # Settlement controls + manual resolve + P&L summary (buy-only, P&L-based W/L)
 │   │   │   ├── ProgressMessages.tsx  # Research progress indicator
 │   │   │   ├── SourcesTab.tsx        # Sources/transcripts tab
 │   │   │   ├── TabNavigation.tsx     # Tab switcher (Research, Briefing, Sources, Trade Log)
@@ -157,7 +157,7 @@ kalshi-research/
 │       ├── kalshi.ts                 # Kalshi API response types
 │       └── corpus.ts                 # Corpus-related types (MentionHistoryRow, MentionEventDetail)
 ├── supabase/
-│   └── migrations/                   # SQL migrations (001-010, all applied)
+│   └── migrations/                   # SQL migrations (001-012, all applied)
 │       ├── 001_initial_schema.sql    # Core tables: events, words, word_clusters, research_runs,
 │       │                             #   word_scores, transcripts, trades, event_results + views
 │       ├── 002_rls_policies.sql      # Row Level Security policies
@@ -169,7 +169,8 @@ kalshi-research/
 │       ├── 008_recent_recordings.sql # research_runs.recent_recordings_result JSONB
 │       ├── 009_event_notes.sql       # events.pre_event_notes, events.post_event_notes
 │       ├── 010_total_cost_real.sql   # trades.total_cost_cents INTEGER → REAL (sub-cent precision)
-│       └── 011_series_ticker_per_speaker.sql  # UNIQUE(series_ticker) → UNIQUE(series_ticker, speaker_id)
+│       ├── 011_series_ticker_per_speaker.sql  # UNIQUE(series_ticker) → UNIQUE(series_ticker, speaker_id)
+│       └── 012_sell_trades.sql       # Sell trade support: action, exit_price, matched_buy_ids, matched_contracts, realized_pnl_cents + result CHECK allows 'sold'
 ├── docs/
 │   └── kalshi-openapi.yaml           # Full Kalshi OpenAPI spec
 ├── Dockerfile                        # Multi-stage Node 22 Alpine build (legacy — from previous Fly.io deployment)
@@ -219,7 +220,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 | `research_runs` | Research pipeline execution records | `event_id`, `layer`, `status`, `model_used`, `briefing`, all agent result JSONB columns, token/cost tracking |
 | `word_scores` | Per-word probability scores from research | `word_id`, `research_run_id`, probabilities (historical/agenda/news/base/combined), `edge`, `confidence`, `reasoning`, `key_evidence` |
 | `transcripts` | Cached speaker transcripts | `speaker`, `title`, `event_date`, `full_text`, `word_count`, `word_frequencies` |
-| `trades` | Logged trades | `event_id`, `word_id`, `side`, `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL — supports sub-cent precision), `result`, `pnl_cents` |
+| `trades` | Logged trades (buy + sell) | `event_id`, `word_id`, `side`, `action` (buy/sell, default buy), `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL), `result` (win/loss/sold), `pnl_cents` (INTEGER), `exit_price` (REAL, sell only), `matched_buy_ids` (UUID[], sell only), `matched_contracts` (INTEGER, tracks sold qty on buys), `realized_pnl_cents` (REAL, P&L from sells) |
 | `event_results` | Settlement outcomes per word | `event_id`, `word_id`, `was_mentioned` |
 | `speakers` | Registered speakers for corpus | `name` |
 | `series` | Kalshi series linked to speakers — one row per (ticker, speaker) pair | `speaker_id`, `series_ticker`, `display_name`, `excluded_tickers`. Unique constraint is `UNIQUE(series_ticker, speaker_id)` — the same Kalshi series (e.g. `KXMENTION`) can be added for multiple speakers independently |
@@ -231,7 +232,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 
 ### Migrations
 
-All 11 migrations (001-011) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
+All 12 migrations (001-012) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
 
 ```bash
 curl -s -X POST "https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query" \
@@ -296,6 +297,7 @@ All run concurrently via `Promise.allSettled`:
 - Produces: probability estimates (historical, agenda, news cycle, base rate, combined), edge vs market price, confidence rating, reasoning, key evidence, and a markdown briefing
 - Outputs `topRecommendations` (strongest yes/no signals), `researchQuality` assessment, and `tradeRecommendations` (full $100 portfolio construction with limit order prices)
 - The `tradeRecommendations` section is the synthesizer's most actionable output — it constructs a complete trade plan as if it were a human trader with $100 to deploy. See [Trade Recommendations](#trade-recommendations-100-budget) below for full details
+- **Briefing recovery:** The synthesizer prompt explicitly instructs the model to embed the full briefing inside the JSON `briefing` field (not as separate text before the JSON). However, models occasionally write the briefing as markdown before the JSON block and use a placeholder (e.g. `[Full markdown briefing text above]`) inside the JSON. The orchestrator detects this and recovers the briefing from the raw response text. See [Briefing Placeholder Recovery](#briefing-placeholder-recovery) in Gotchas.
 
 ### Model Presets
 
@@ -312,7 +314,8 @@ Configurable per-research-run via the UI:
 
 - Wraps `@anthropic-ai/sdk` with retry logic (4 retries, exponential backoff starting at 3s)
 - Handles `web_search_20250305` server-side tool (Anthropic executes searches within the API call)
-- Handles `pause_turn` resumptions (up to 5 continuations)
+- Handles `pause_turn` resumptions (up to 5 continuations) — text content is **accumulated** across continuations (not overwritten), so content from earlier continuations is preserved
+- Logs an explicit warning when `stop_reason === "max_tokens"` — the response was truncated and output may be incomplete
 - `callAgent(options)` — Raw text response with token tracking
 - `callAgentForJson<T>(options)` — Parses JSON from response, auto-retries on parse failure by asking Claude to fix the JSON
 - `parseJsonResponse<T>(text)` — Extracts JSON from code fences, bare JSON, or balanced-brace matching
@@ -328,10 +331,11 @@ User pastes Kalshi URL
   → "Start Baseline Research" navigates to /research/[eventId] (does NOT auto-trigger research)
   → User can immediately log trades via Trade Log tab (QuickTradeTable uses words from DB)
   → User optionally clicks "Start Research" to trigger AI pipeline
-  → /api/research/trigger (creates research_run, starts orchestrator in background)
+  → /api/research/trigger (creates research_run, streams SSE progress events)
   → Orchestrator runs Phase 1 → Phase 2 → Phase 3
   → Results saved to Supabase (research_runs, word_scores, word_clusters)
-  → Frontend polls /api/research/status/[runId] for progress
+  → SSE completion event sent with token usage, score counts, and any warnings
+  → Frontend calls fetchData(), switches to "research" tab, scrolls to top
   → /api/research/[eventId] returns full results for display
   → Trade Log tab upgrades to WordScoresTable (with AI scores + inline trade form)
 ```
@@ -380,11 +384,12 @@ Four tabs: **Research**, **Briefing**, **Sources**, **Trade Log**
 
 **Trade Log Tab:**
 - **Trade logging works without research.** When no research has been run, `QuickTradeTable` renders using the event's `words` list (loaded from Kalshi). When research results exist, `WordScoresTable` renders instead (with AI scores + inline trade form).
-- `QuickTradeTable` — Lightweight trade table showing all words with live prices, search, sorting, and the same inline trade form (side/price/contracts/editable cost). Uses `words` from Supabase (always available after event load), not `wordScores` (only available after research).
+- **Buy/Sell support** — Both `QuickTradeTable` and `WordScoresTable` have a BUY/SELL toggle above the YES/NO side buttons. Sell trades FIFO-match against open buys for the same word+side.
+- `QuickTradeTable` — Lightweight trade table showing all words with live prices, search, sorting, and inline trade form (action/side/price/contracts/editable cost). Uses `words` from Supabase (always available after event load), not `wordScores` (only available after research).
 - `WordScoresTable` — Full scores table with inline trade form for logging new trades (only shown when research has been run)
-- `LoggedTrades` — View logged trades with P&L after settlement, delete trades
-- `ResolveEvent` — Settlement controls: "Check Settlement" / "Re-check Settlement" button (persists after resolution), "Manual Resolve" button (hidden after resolution), settlement status feedback, and P&L summary
-- Log trades with side, price, contracts, and editable total cost
+- `LoggedTrades` — Shows all trades with Action column (BUY/SELL badges), Side, Price (full sub-cent precision), Qty, Cost (dollars), Result (win/loss/sold badges), P&L (dollars, **buy rows only** — sell rows show dash to avoid double-counting). Supports inline editing of entry price and contracts for unmatched buys. Deleting a sell trade unwinds the FIFO match on the associated buys.
+- `ResolveEvent` — Settlement controls: "Check Settlement" / "Re-check Settlement" button (persists after resolution), "Manual Resolve" button (hidden after resolution), settlement status feedback, and P&L summary. P&L summary uses **buy trades only** for totals. Win/loss determined by **actual P&L** (positive = win, negative = loss), not the `result` field — so sold trades that lost money count as losses.
+- Log trades with action (buy/sell), side, price, contracts, and editable total cost
 
 ### Corpus Page (`/corpus`)
 
@@ -399,9 +404,16 @@ Four tabs: **Research**, **Briefing**, **Sources**, **Trade Log**
 
 ### Analytics Page (`/analytics`)
 
-- Overall stats: total trades, wins, losses, win rate, total P&L, expected value
-- Per-event performance table with expandable trade details
-- Shows word-level breakdown: side, entry price, mention rate, edge, result, P&L
+- **Summary cards (8 boxes):** Total Trades, Total Cost, Wins, Losses, Win Rate, Total P&L, EV, ROI
+- **Overview/Calendar toggle** (same style as P&L page):
+  - **Overview** — Cumulative P&L line chart (Recharts, purple line) built from logged trade data grouped by event date
+  - **Calendar** — Monthly grid showing daily P&L from logged trades, color-coded cells (green/red), trade counts, weekly summaries, month navigation, monthly stats header
+- **Per-Event Performance table** (always visible below either view):
+  - Columns: Event, Date, Trades, Cost, W/L, Win Rate, P&L, ROI
+  - Expandable rows showing word-level breakdown: word, side, entry price, contracts, cost, mention rate, result, P&L
+  - ROI = P&L / total cost deployed for that event
+- **Data source:** Only counts **buy trades** (`action = 'buy'`) for P&L to avoid double-counting with sell trades. Sell P&L is already reflected in the matched buy's `pnl_cents`.
+- **W/L counting:** Wins = trades with `result === "win"`. Losses = all other resolved trades (includes both `result === "loss"` AND `result === "sold"`). This ensures the W/L column matches the expanded per-trade dropdown which shows "L" for any non-win trade. Win rate = `wins / total resolved trades`.
 
 ### Trade Analytics Page (`/trade-analytics`)
 
@@ -871,10 +883,11 @@ The trade form allows logging trades with precise cost tracking for both limit a
 **TradeForm interface:**
 ```typescript
 interface TradeForm {
+  action: "buy" | "sell"; // BUY/SELL toggle (default "buy")
   side: "yes" | "no";
-  entryPrice: number;   // Decimal 0-1 (e.g. 0.85 = 85¢)
-  contracts: number;     // Integer
-  totalCost: number;     // Dollars (e.g. 1.16 = $1.16)
+  entryPrice: number;     // Decimal 0-1. For sells, this is the exit price.
+  contracts: number;      // Integer
+  totalCost: number;      // Dollars (e.g. 1.16 = $1.16)
 }
 ```
 
@@ -937,14 +950,26 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/trades/log` | POST | Log a trade `{ eventId, wordId, side, entryPrice, contracts, totalCostCents }` |
+| `/api/trades/log` | POST | Log a buy or sell trade. Sells use FIFO matching against open buys. Body: `{ eventId, wordId, side, entryPrice, contracts, totalCostCents, action? }` |
 | `/api/trades/results` | GET/POST | Get or set trade results |
-| `/api/trades/[tradeId]` | DELETE | Delete a logged trade |
+| `/api/trades/[tradeId]` | DELETE/PATCH | Delete or edit a trade. Sell deletion unwinds FIFO matches. Buy deletion blocked if sells exist. Sell editing blocked. Buy editing blocked if sells matched. |
 
 **Trade log body details:**
-- `entryPrice` — Decimal 0-1 (e.g. `0.116` for 11.6¢)
+- `action` — `"buy"` (default) or `"sell"`. When `"sell"`, the API FIFO-matches against open buys for the same word+side.
+- `entryPrice` — Decimal 0-1 (e.g. `0.116` for 11.6¢). For sells, this is the exit/sell price.
 - `contracts` — Integer count
 - `totalCostCents` — Total cost in cents as a float (e.g. `116.0` for $1.16). Stored as REAL in Postgres, no rounding.
+
+**Sell trade FIFO matching (in `trades/log/route.ts`):**
+1. Fetches open buy trades for the same `event_id`, `word_id`, `side` with `action='buy'`, `result IS NULL`, ordered by `created_at ASC`
+2. Pre-calculates matches (consuming available contracts from each buy, FIFO order)
+3. Inserts the sell trade record first (so if insert fails, no buys are modified)
+4. Updates matched buys: increments `matched_contracts`, accumulates `realized_pnl_cents`. Fully consumed buys get `result='sold'` and `pnl_cents` set.
+5. P&L per match = `(exitPrice - buyEntryPrice) * contracts * 100`. Values are `Math.round()`-ed for `pnl_cents` (INTEGER column).
+
+**Sell trade deletion (in `trades/[tradeId]/route.ts`):**
+- Reverses the FIFO match: decrements `matched_contracts` on matched buys, clears `result='sold'` back to `null`
+- Uses `matched_buy_ids` array on the sell trade to find which buys to update
 
 ### Corpus
 
@@ -973,7 +998,7 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/settlement/check` | POST | Check market settlement. Body: `{ eventId? }`. When `eventId` is provided, checks that specific event regardless of status (allows re-checking completed events). When omitted, only checks unsettled events (`status != 'completed'`). Auto-settles if all markets have results. |
+| `/api/settlement/check` | POST | Check market settlement. Body: `{ eventId? }`. When `eventId` is provided, checks that specific event regardless of status (allows re-checking completed events). When omitted, only checks unsettled events (`status != 'completed'`). Auto-settles if all markets have results. **Also refreshes `event_date`** from Kalshi's current `sub_title` — fixes recurring events (e.g. press briefings) where the initial date was stale. |
 | `/api/analytics/performance` | GET | Aggregate performance analytics |
 | `/api/analytics/trade-analytics` | GET | Per-word trade analytics grouped by speaker. Returns resolved trades aggregated by word with edge calculations, individual entries, and expandable trade details. Supports "All" aggregation across speakers |
 | `/api/ws/prices` | GET | WebSocket proxy for live Kalshi prices |
@@ -1041,21 +1066,20 @@ Parses Kalshi URLs and raw event tickers. Supports formats like `https://kalshi.
 
 ### `src/lib/settlement.ts`
 
-Settlement logic — resolves events by recording word mention results and calculating trade P&L.
+Settlement logic — resolves events by recording word mention results and calculating trade P&L. **Sell-aware**: only settles buy trades that haven't been fully sold.
 
-**P&L Calculation:**
-- Uses `total_cost_cents` from the trade record (the exact cost the user entered) for P&L
-- Falls back to `entry_price * contracts * 100` for older trades that may have `null` total_cost_cents
-- Win P&L: `contracts * 100 - costCents` (payout minus cost)
-- Loss P&L: `-costCents` (lose the entire cost)
-- No rounding — preserves sub-cent precision throughout
+**Settlement behavior with sell trades:**
+- Queries `action = 'buy' AND result IS NULL` — skips fully sold buys (`result = 'sold'`)
+- For partially sold buys (`matched_contracts > 0` but less than `contracts`): settlement P&L applies only to remaining open contracts
+- Total `pnl_cents` = `realized_pnl_cents` (from sells) + settlement P&L (from remaining contracts)
+- `pnl_cents` is `Math.round()`-ed before writing to DB (column is INTEGER, calculations produce floats from sub-cent entry prices)
 
-```typescript
-const costCents = trade.total_cost_cents ?? trade.entry_price * trade.contracts * 100;
-const pnlCents = isWin
-  ? trade.contracts * 100 - costCents
-  : -costCents;
-```
+**P&L Calculation (per open contract):**
+- Win P&L: `openContracts * 100 - openCostCents`
+- Loss P&L: `-openCostCents`
+- Where `openContracts = trade.contracts - trade.matched_contracts` and `openCostCents = trade.entry_price * openContracts * 100`
+
+**CRITICAL — `pnl_cents` is INTEGER:** All P&L values must be `Math.round()`-ed before writing to the `trades` table. Sub-cent entry prices (e.g. `0.1169`) produce float P&L values (e.g. `-1052.1`) that Supabase silently rejects when writing to an INTEGER column. This caused a bug where settlement appeared to succeed but trades remained unsettled.
 
 ---
 
@@ -1203,6 +1227,7 @@ All migrations are in `supabase/migrations/` and have been applied to the live d
 | 009 | `009_event_notes.sql` | `events.pre_event_notes TEXT`, `events.post_event_notes TEXT` |
 | 010 | `010_total_cost_real.sql` | `trades.total_cost_cents` changed from `INTEGER` to `REAL` for sub-cent precision |
 | 011 | `011_series_ticker_per_speaker.sql` | Changed `series.series_ticker` uniqueness from global `UNIQUE` to `UNIQUE(series_ticker, speaker_id)`. Fixes: Kalshi series like `KXMENTION` that cover multiple speakers can now be added independently per speaker. Previously, adding the same ticker for a second speaker would throw a 409 "already exists" error. |
+| 012 | `012_sell_trades.sql` | Sell trade support. Adds: `action TEXT NOT NULL DEFAULT 'buy'` (CHECK: buy/sell), `exit_price REAL`, `matched_buy_ids UUID[]`, `matched_contracts INTEGER DEFAULT 0`, `realized_pnl_cents REAL`. Widens `result` CHECK to include `'sold'`. Adds index `idx_trades_word_action` on `(word_id, action, side)` for FIFO lookups. All existing trades get `action='buy'` and `matched_contracts=0` via defaults — full backwards compatibility. |
 
 To apply new migrations, use the Supabase Management API (never ask the user to do it manually):
 
@@ -1236,6 +1261,7 @@ The trade logging system preserves exact cost values with no rounding:
 - **Database:** `trades.total_cost_cents` is `REAL` (not INTEGER) — stores sub-cent values like `11.6`
 - **Settlement:** P&L uses `total_cost_cents` directly, falls back to `entry_price * contracts * 100` for legacy trades
 - **No `Math.round()` anywhere** in the cost chain from form to database to settlement
+- **EXCEPTION: `pnl_cents` is INTEGER** — All P&L values written to `trades.pnl_cents` MUST be `Math.round()`-ed. Sub-cent entry prices produce float P&L values that Supabase silently rejects on INTEGER columns. This applies in `settlement.ts` and `trades/log/route.ts` (sell matching).
 
 ### Search Bars
 
@@ -1285,7 +1311,8 @@ const yes_price = raw.yes_price !== undefined
 ### Claude API
 
 - Web search is a **server-side tool** — Anthropic's infrastructure executes searches within the API call. No client-side search needed.
-- Handle `pause_turn` stop reason by re-sending the response to resume (the server-side tool loop hit its iteration limit)
+- Handle `pause_turn` stop reason by re-sending the response to resume (the server-side tool loop hit its iteration limit). Text from all continuations is accumulated — earlier continuations' text is preserved.
+- `max_tokens` truncation is logged as a warning. If a response is truncated, the JSON may be incomplete and `callAgentForJson` will attempt to recover by asking Claude to fix it — but this may not recover all data.
 - JSON responses from Claude may need extraction from code fences — `parseJsonResponse` handles this with 3 fallback strategies
 - Retries on 429, 500, 502, 503, 529, and connection errors with exponential backoff (3s base, 4 retries max)
 - If JSON parsing fails, `callAgentForJson` auto-retries by asking Claude to fix the malformed JSON
@@ -1297,6 +1324,9 @@ const yes_price = raw.yes_price !== undefined
 - Pipeline supports cancellation: each phase checks `research_runs.status` before proceeding
 - Transcript metadata from the historical agent is cached in the `transcripts` table for future runs
 - Token usage and cost are tracked cumulatively across all agents and saved to the research run record
+- **Completion reporting:** The SSE completion event includes `warnings` array when issues are detected (e.g. partial word score saves, missing/short briefing). Warnings surface in the research page progress messages so the user sees them immediately.
+- **Price fetch warning:** If Kalshi price fetch fails when triggering research, a warning is sent via SSE instead of silently defaulting all prices to 0.50 (which produces inaccurate edge calculations)
+- **Post-completion behavior:** After a run completes on the research page, the page awaits `fetchData()`, switches to the "research" tab, and scrolls to top — ensuring the results are immediately visible
 
 ### Price Architecture (Yes + No)
 
@@ -1370,6 +1400,36 @@ interface PriceData {
 - `EventContext` is a presentational component (not a React context) that displays event format, agenda, news cycle, and trending topics from phase 1 agent results
 - `LoggedTrades` appears in **two locations**: Research tab (when settled, for note-writing convenience) and Trade Log tab (always)
 
+### Briefing Placeholder Recovery
+
+**Problem:** When asking Claude to return a long markdown briefing (800-1500 words) inside a JSON `briefing` field, the model sometimes writes the briefing as markdown prose BEFORE the JSON block, then puts a placeholder like `[Full markdown briefing text above]` inside the JSON field. Since `parseJsonResponse` only extracts the JSON, the actual briefing text is lost.
+
+**This is intermittent** — it depends on the model, prompt length, and response structure. Observed with Sonnet but could happen with any model. It's more likely when the combined output (briefing + word scores + trade recommendations) is very long.
+
+**Two-layer defense in the codebase:**
+
+1. **Synthesizer prompt** (`src/agents/synthesizer.ts`) — Contains an explicit `CRITICAL` instruction: "The 'briefing' field MUST contain the COMPLETE briefing text as an inline JSON string with `\n` for newlines. Do NOT write the briefing separately before the JSON." This prevents the issue in most cases.
+
+2. **Orchestrator recovery** (`src/agents/orchestrator.ts`) — After receiving the synthesis result, checks if the `briefing` field is a placeholder (length < 100, or contains phrases like "briefing text above", "see above", "markdown above"). If detected AND the raw response content has substantial text before the JSON block (>200 chars), extracts that text as the briefing. Logs: `[orchestrator] Recovered briefing from raw response (N chars)`.
+
+3. **Completion warning** — If the final briefing is still missing or suspiciously short (<100 chars) after recovery, a warning is logged AND sent to the frontend via the SSE completion event. The research page displays this as `⚠️ Briefing is missing or incomplete` in the progress messages.
+
+**If a briefing is lost despite these defenses:**
+- The word scores and trade recommendations are typically fine (they're structured JSON fields)
+- The briefing can be regenerated by re-running research (all other agent results are cached)
+- Check `logs/launchd-err.log` for `[orchestrator]` warnings
+
+### W/L Counting in Analytics
+
+**Rule:** Wins = `result === "win"`. Losses = **all other resolved trades** (total resolved minus wins). This includes both `result === "loss"` AND `result === "sold"`.
+
+**Why:** The trade result can be `"win"`, `"loss"`, or `"sold"`. Sold trades represent early exits that typically result in realized losses. The per-trade dropdown UI shows "L" for any non-win trade (`t.result === "win" ? "W" : "L"`). If losses were counted as only `result === "loss"`, the W/L summary would not match the dropdown — sold trades would fall through the cracks.
+
+**Where this applies:**
+- Overall stats in `GET /api/analytics/performance` — `losses = resolvedTrades.length - wins`
+- Per-event stats in the same route — `eventLosses = eventResolved.length - eventWins`
+- The `sold` count was removed from the API response since it's now rolled into losses
+
 ### AI Agent Response Defensiveness
 
 AI agents (Claude) may return JSON in unexpected shapes — missing fields, alternative structures, or error objects instead of the expected schema. All components that consume agent results must use optional chaining (`?.`) when accessing nested properties, especially arrays.
@@ -1440,6 +1500,63 @@ The corpus system has protections to prevent accidental data loss when importing
 - Same logic as series delete: events with research_runs or trades are unlinked, not deleted
 - The event's ticker is still added to `excluded_tickers` to prevent re-import
 
+### Sell Trade System (FIFO Offset Matching)
+
+The manual trade logging system supports both **buy** and **sell** trades. Sells represent early exits from positions before settlement (e.g. bought YES at 47¢, sold at 31¢ for a loss).
+
+**How it works:**
+1. User toggles BUY/SELL in the trade form, selects side (YES/NO), enters price and contracts
+2. For sells, the API FIFO-matches against open buys for the same word+side
+3. Matched buys have `matched_contracts` incremented and `realized_pnl_cents` accumulated
+4. Fully matched buys get `result='sold'` and `pnl_cents` set to the realized P&L
+5. The sell trade record stores `matched_buy_ids` for traceability
+
+**P&L tracking — no double-counting:**
+- P&L lives on the **buy** row only. Sell rows show `-` in the P&L column.
+- A sold buy's `pnl_cents` = total realized P&L from all sells against it
+- A partially sold buy that then settles: `pnl_cents` = realized (from sells) + settlement (on remaining contracts)
+- Analytics APIs filter to `action = 'buy'` for P&L totals — sell rows are never counted
+
+**Win/loss determination (ResolveEvent P&L summary):**
+- Based on **actual P&L**, not the `result` field
+- `pnl_cents >= 0` → win, `pnl_cents < 0` → loss
+- This means sold trades that lost money (e.g. bought at 47¢, sold at 31¢) correctly count as losses
+
+**Deletion safety:**
+- Deleting a sell unwinds the FIFO match (decrements `matched_contracts` on buys, clears `result='sold'`)
+- Deleting a buy that has matched sells is blocked (user must delete sells first)
+- Editing sells is blocked; editing matched buys is blocked
+
+**Trade type (`components.ts`):**
+```typescript
+interface Trade {
+  id: string;
+  word_id: string;
+  side: "yes" | "no";
+  action: "buy" | "sell";
+  entry_price: number;
+  contracts: number;
+  total_cost_cents: number;
+  result: "win" | "loss" | "sold" | null;
+  pnl_cents: number | null;
+  exit_price: number | null;        // sell price (sell trades only)
+  matched_buy_ids: string[] | null; // buy IDs this sell matched (sell trades only)
+  matched_contracts: number;        // how many contracts sold (on buys: sold qty; on sells: always = contracts)
+  realized_pnl_cents: number | null; // P&L from sells (accumulated on buys, snapshot on sells)
+  agent_estimated_probability: number | null;
+  agent_edge: number | null;
+  created_at: string;
+}
+```
+
+### Event Date Refresh (Recurring Events)
+
+For recurring events like "What will Karoline Leavitt say in the next press briefing?", Kalshi's `event_date` (derived from `sub_title`) may change after the event is initially loaded. The ticker encodes the **expiry window** (e.g. `KXSECPRESSMENTION-26MAR29` = expires March 29), but the actual briefing may happen on March 10. Kalshi updates the `sub_title` to reflect the actual date after the event occurs.
+
+**Problem:** If the event was loaded before the briefing, our DB stores the old date, causing incorrect calendar/chart placement in analytics.
+
+**Fix:** The settlement check route (`/api/settlement/check`) refreshes `event_date` from Kalshi's current `sub_title` on every check. This runs automatically when the user clicks "Check Settlement" or "Re-check Settlement".
+
 ### Settlement & Re-check Flow
 
 The settlement system allows checking market outcomes and resolving trades, with support for **re-checking after initial settlement** (e.g. when trades are added after the first settlement run).
@@ -1451,7 +1568,7 @@ The settlement system allows checking market outcomes and resolving trades, with
 3. API checks each word's market on Kalshi for settlement results (`GET /markets/{ticker}`)
 4. Words already in `event_results` table are skipped (marked `already_settled`)
 5. If ALL words have results and no API errors → auto-settles via `settleEvent()` in `src/lib/settlement.ts`
-6. `settleEvent()` upserts `event_results`, calculates win/loss and P&L for each trade, sets event status to `"completed"`
+6. `settleEvent()` upserts `event_results`, calculates win/loss and P&L for each **open buy trade** (skips fully sold buys, handles partially sold buys), sets event status to `"completed"`
 
 **Re-check behavior:**
 
