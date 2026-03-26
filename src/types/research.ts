@@ -182,6 +182,37 @@ export interface SynthesisResult {
     overallConfidence: "high" | "medium" | "low";
     caveats: string[];
   };
+  tradeRecommendations?: {
+    trades: Array<{
+      word: string;
+      ticker: string;
+      side: "yes" | "no";
+      targetEntry: number; // 0-1 decimal (e.g. 0.22 = 22¢)
+      contracts: number;
+      costCents: number; // total cost in cents
+      reasoning: string; // mini trade thesis
+      confidence: "high" | "medium" | "low";
+      clusterName: string | null;
+      riskNote: string; // what could go wrong
+      edgeAtTarget: number; // combinedProbability - targetEntry (for YES), or (1-combinedProbability) - targetEntry (for NO)
+    }>;
+    avoid: Array<{
+      word: string;
+      ticker: string;
+      reasoning: string;
+    }>;
+    portfolioSummary: {
+      totalDeployed: number; // cents
+      budgetRemaining: number; // cents out of 10000 (=$100)
+      clusterExposure: Array<{
+        cluster: string;
+        amountCents: number;
+        words: string[];
+      }>;
+      riskNotes: string[]; // portfolio-level risk observations
+      strategy: string; // 2-3 sentence summary of overall approach
+    };
+  };
 }
 
 // ── Corpus Types ──

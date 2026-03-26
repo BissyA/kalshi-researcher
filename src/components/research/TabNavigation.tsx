@@ -9,6 +9,7 @@ interface TabNavigationProps {
 
 const tabs: Array<{ id: TabId; label: string; icon: string }> = [
   { id: "research", label: "Research", icon: "📋" },
+  { id: "briefing", label: "Briefing", icon: "📝" },
   { id: "sources", label: "Sources", icon: "📎" },
   { id: "tradelog", label: "Trade Log", icon: "📊" },
 ];

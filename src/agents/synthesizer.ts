@@ -116,10 +116,59 @@ In addition to the structured word scores, produce a comprehensive research brie
 
 The trader will use this briefing to form their OWN view before looking at scores. Write it as if you're briefing a trader before a session, not as a data dump. Use markdown headings (##), bold, and bullet points for structure.
 
+=== TRADE RECOMMENDATIONS — $100 BUDGET ===
+
+After completing your word analysis, you MUST produce a "tradeRecommendations" section. You are acting as an experienced Kalshi mention market trader with $100 to deploy on this event. Think like a human trader, not a quant screen.
+
+YOUR ROLE: You are the trader. You have read all the research. Now construct an actual trade plan — which words to buy, at what price, how many contracts, and WHY. The trader will use your recommendations to place limit orders.
+
+KEY PRINCIPLES FOR TRADE CONSTRUCTION:
+
+1. **Ideal Entry Prices (Limit Orders):** For each trade, recommend a TARGET ENTRY PRICE — the price at which you'd want to be filled. This is NOT necessarily the current market price. Think about:
+   - What price represents genuine value based on your probability estimate?
+   - Would you rather wait for a better fill than pay the current ask?
+   - For high-conviction trades, you might accept current market. For marginal trades, set a tighter limit.
+   - For YES trades: target entry should be BELOW your combinedProbability (you're buying cheap)
+   - For NO trades: target entry should be BELOW (1 - combinedProbability) (you're buying the NO side cheap)
+
+2. **Portfolio Construction & Diversification:**
+   - You have $100 (10,000¢). Allocate it thoughtfully across trades.
+   - Do NOT spread too thin (20 trades at $5 each = noise). Concentrate on your best ideas.
+   - Do NOT concentrate too heavily (1 trade at $80 = reckless). Diversify across themes.
+   - Consider cluster correlation: if "border," "wall," and "immigration" are all in the same thematic cluster, they will likely all hit or all miss together. Cap your exposure to any single cluster.
+   - Aim for a mix of high-probability/low-payout trades (e.g. YES at 85¢) and low-probability/high-payout trades (e.g. YES at 10¢) where you have genuine edge.
+
+3. **Side Selection (YES vs NO):**
+   - Buy YES when you believe the word WILL be mentioned and the YES price is below your probability.
+   - Buy NO when you believe the word WON'T be mentioned and the NO price (= 100¢ - YES price) is below (1 - your probability).
+   - Don't default to YES. Many profitable trades are on the NO side for words the market overestimates.
+
+4. **Reasoning Like a Human, Not a Formula:**
+   - Edge calculations are useful but LIMITED. They're derived from Kalshi market prices which can be wrong, and from historical corpus data which may not include external transcripts or recent behavioral shifts.
+   - Use edge as ONE signal among many. Your judgment should incorporate: transcript patterns, news cycle momentum, event format, speaker tendencies, recency of word usage, and cluster dynamics.
+   - If a word was mentioned in the last 8 consecutive speeches and immigration is dominating the news, that's a strong YES even if calculated edge is modest.
+   - Conversely, if a word has high calculated edge but you have low confidence in the data, size it smaller or skip it.
+
+5. **Confidence-Based Sizing:**
+   - High confidence + strong thesis = larger position (more contracts)
+   - Low confidence + thin evidence = smaller position or avoid entirely
+   - This is about how SURE you are of your view, not just how big the edge number is.
+
+6. **Avoid List:**
+   - Include words you're deliberately NOT trading and explain why.
+   - Reasons to avoid: low confidence in your probability estimate, insufficient data, efficiently priced with no clear view, or correlated with a word you already have a position on.
+   - Do NOT avoid words just because the market price matches your estimate — avoid them because YOU don't have a strong enough view.
+
+7. **Portfolio Summary:**
+   - Summarize total deployment, remaining budget, cluster exposure breakdown, and overall strategy.
+   - Include portfolio-level risk notes (e.g., "Heavy on immigration theme — a pivot away from border topics would hurt multiple positions").
+
+IMPORTANT: Include the trade recommendations as a dedicated section in your briefing markdown AFTER the word analysis section, using the heading "## Trade Recommendations ($100 Budget)". Format it as a readable table and commentary. The structured JSON tradeRecommendations field should contain the same information in machine-readable form.
+
 Return structured JSON in this exact format:
 \`\`\`json
 {
-  "briefing": "## Event Overview\\n\\nMarkdown briefing document here...",
+  "briefing": "## Event Overview\\n\\nMarkdown briefing document here...\\n\\n## Trade Recommendations ($100 Budget)\\n\\n...",
   "wordScores": [
     {
       "word": "string",
@@ -145,6 +194,43 @@ Return structured JSON in this exact format:
       { "word": "string", "edge": number, "reasoning": "string" }
     ]
   },
+  "tradeRecommendations": {
+    "trades": [
+      {
+        "word": "string",
+        "ticker": "string",
+        "side": "yes|no",
+        "targetEntry": number (0.0-1.0, the limit order price),
+        "contracts": number (integer, how many to buy),
+        "costCents": number (targetEntry * 100 * contracts for YES, or (1-targetEntry) * 100 * contracts... wait no: costCents = targetEntry * 100 * contracts — targetEntry is already the price of the side you're buying),
+        "reasoning": "string (2-3 sentence mini trade thesis — why this word, why this side, why this price)",
+        "confidence": "high|medium|low",
+        "clusterName": "string or null",
+        "riskNote": "string (what could make this trade lose)",
+        "edgeAtTarget": number (your probability of winning minus your target entry price — always from the perspective of the side you're buying)
+      }
+    ],
+    "avoid": [
+      {
+        "word": "string",
+        "ticker": "string",
+        "reasoning": "string (why you're not trading this)"
+      }
+    ],
+    "portfolioSummary": {
+      "totalDeployed": number (total cents across all trades),
+      "budgetRemaining": number (10000 - totalDeployed),
+      "clusterExposure": [
+        {
+          "cluster": "string (cluster name or 'Unclustered')",
+          "amountCents": number,
+          "words": ["string"]
+        }
+      ],
+      "riskNotes": ["string (portfolio-level risk observations)"],
+      "strategy": "string (2-3 sentence summary of your overall trading approach for this event)"
+    }
+  },
   "researchQuality": {
     "transcriptsAnalyzed": number,
     "sourcesConsulted": number,
@@ -154,7 +240,19 @@ Return structured JSON in this exact format:
 }
 \`\`\`
 
-You MUST include an entry in wordScores for EVERY word in the list. Sort strongYes and strongNo by absolute edge descending.`;
+COST CALCULATION: costCents = targetEntry * 100 * contracts. For example, buying 5 YES contracts at 0.22 (22¢) costs 5 * 22 = 110 cents ($1.10). Buying 3 NO contracts at 0.15 (15¢ NO price) costs 3 * 15 = 45 cents ($0.45). The targetEntry is always the price of the SIDE you are buying.
+
+BUDGET CONSTRAINT: totalDeployed MUST NOT exceed 10000 (= $100). Leave some buffer — deploying exactly $100 with no room is aggressive. Aim for $70-$90 deployed unless you have exceptionally high conviction across the board.
+
+FORMATTING — DOLLARS vs CENTS in the briefing markdown:
+- Use DOLLARS (e.g. "$7.00", "$26.82", "$85.22") for all allocation amounts, costs, totals, and budget figures. Nobody says "8,522 cents" — say "$85.22".
+- Use CENTS (e.g. "28¢", "93¢") ONLY for strike/entry prices and market prices — these are how Kalshi displays prices.
+- Example: "Buy 25 YES contracts at 28¢ ($7.00)" — price in cents, cost in dollars.
+- Portfolio summary: "Total deployed: $85.22 | Budget remaining: $14.78" — always dollars.
+- Cluster exposure: "$35.52 in Iran Military Operations cluster" — always dollars.
+The structured JSON fields (costCents, totalDeployed, budgetRemaining, amountCents) remain in cents for programmatic use — this instruction only applies to the briefing markdown text.
+
+You MUST include an entry in wordScores for EVERY word in the list. Sort strongYes and strongNo by absolute edge descending. The tradeRecommendations.trades should be sorted by costCents descending (largest positions first).`;
 
   // Build corpus section(s) with per-event detail
   function formatCorpusDataset(dataset: Record<string, CorpusMentionRate>, label: string): string {
@@ -229,7 +327,7 @@ Produce a score for EVERY word. Be precise, well-calibrated, and provide actiona
   return callAgentForJson<SynthesisResult>({
     systemPrompt,
     userMessage,
-    maxTokens: 32000,
+    maxTokens: 48000,
     enableWebSearch: false,
     model: input.model,
   });

@@ -111,7 +111,7 @@ export interface EventResult {
 // ── UI Types ──
 
 export type SortKey = "word" | "combined" | "edge" | "market" | "confidence";
-export type TabId = "research" | "sources" | "tradelog";
+export type TabId = "research" | "briefing" | "sources" | "tradelog";
 
 // ── Live Prices ──
 

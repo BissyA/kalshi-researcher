@@ -61,6 +61,7 @@ export function WordTable({
   const [sortAsc, setSortAsc] = useState(false);
   const [expandedWord, setExpandedWord] = useState<string | null>(null);
   const [catDropdownOpen, setCatDropdownOpen] = useState(false);
+  const [speakerDropdownOpen, setSpeakerDropdownOpen] = useState(false);
   const [search, setSearch] = useState("");
 
   // Build mention rate lookup from corpus data
@@ -224,18 +225,39 @@ export function WordTable({
         </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-zinc-500">Speaker</label>
-          <select
-            value={selectedSpeakerId}
-            onChange={(e) => onSpeakerChange(e.target.value)}
-            className="px-3 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-white text-sm focus:outline-none focus:border-zinc-500"
-          >
-            <option value="">Select speaker...</option>
-            {speakers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+          <div className="relative">
+            <button
+              onClick={() => setSpeakerDropdownOpen(!speakerDropdownOpen)}
+              className="px-3 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-sm text-white focus:outline-none focus:border-zinc-500 flex items-center gap-2"
+            >
+              {speakers.find((s) => s.id === selectedSpeakerId)?.name || "Select speaker..."}
+              <svg className="w-3 h-3 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {speakerDropdownOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setSpeakerDropdownOpen(false)} />
+                <div className="absolute left-0 top-full mt-1 z-20 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[180px]">
+                  <button
+                    onClick={() => { onSpeakerChange(""); setSpeakerDropdownOpen(false); }}
+                    className={`w-full text-left px-3 py-2 hover:bg-zinc-800 text-sm ${!selectedSpeakerId ? "text-white" : "text-zinc-400"}`}
+                  >
+                    Select speaker...
+                  </button>
+                  {speakers.map((s) => (
+                    <button
+                      key={s.id}
+                      onClick={() => { onSpeakerChange(s.id); setSpeakerDropdownOpen(false); }}
+                      className={`w-full text-left px-3 py-2 hover:bg-zinc-800 text-sm ${selectedSpeakerId === s.id ? "text-white" : "text-zinc-300"}`}
+                    >
+                      {s.name}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           {selectedSpeakerId && categories.length > 0 && onCategoriesChange && (
             <div className="relative ml-3">
               <button
@@ -435,7 +457,7 @@ function WordRowGroup({
             : "\u2014"}
         </td>
         <td className="px-4 py-3 text-right text-zinc-500">
-          {row.events.length > 0 ? (isExpanded ? "\u25B2" : "\u25BC") : ""}
+          <span className="text-xs">{row.events.length > 0 ? (isExpanded ? "\u25B2" : "\u25BC") : ""}</span>
         </td>
       </tr>
       {isExpanded && row.events.length > 0 && (

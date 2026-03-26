@@ -49,7 +49,7 @@ kalshi-research/
 │   │   ├── page.tsx                  # Home — URL input, event loader, research launcher
 │   │   ├── layout.tsx                # Root layout with nav (Corpus, Analytics, Trade Analytics, P&L)
 │   │   ├── research/
-│   │   │   └── [eventId]/page.tsx    # Research output page (tabs: Research, Sources, Trade Log)
+│   │   │   └── [eventId]/page.tsx    # Research output page (tabs: Research, Briefing, Sources, Trade Log)
 │   │   ├── corpus/
 │   │   │   └── page.tsx              # Corpus management (speakers, series, transcripts)
 │   │   ├── analytics/
@@ -108,13 +108,13 @@ kalshi-research/
 │   │   ├── market-analysis.ts       # Market pricing analysis
 │   │   ├── recent-recordings.ts     # Recent recording discovery
 │   │   ├── clustering.ts            # Word clustering (uses phase 1 outputs)
-│   │   └── synthesizer.ts           # Final synthesis (combines everything)
+│   │   └── synthesizer.ts           # Final synthesis (combines everything + $100 trade recommendations)
 │   ├── components/
 │   │   ├── research/                 # Research page components
 │   │   │   ├── WordTable.tsx         # Main word table — prices, historical rates, edge, search bar, expandable event details
 │   │   │   ├── WordScoresTable.tsx   # Detailed AI scores grid — probabilities, confidence, trade form, cluster filter
 │   │   │   ├── ResearchNotes.tsx     # Pre/post event notes (auto-save, 800ms debounce)
-│   │   │   ├── ResearchBriefing.tsx  # AI-generated briefing (markdown)
+│   │   │   ├── ResearchBriefing.tsx  # AI-generated briefing + trade recommendations (markdown, rendered in Briefing tab)
 │   │   │   ├── AgentOutputAccordion.tsx # Expandable per-agent results
 │   │   │   ├── ClusterView.tsx       # Word cluster visualization
 │   │   │   ├── EventHeader.tsx       # Event metadata header
@@ -125,7 +125,7 @@ kalshi-research/
 │   │   │   ├── ResolveEvent.tsx      # Settlement controls + manual resolve + P&L summary
 │   │   │   ├── ProgressMessages.tsx  # Research progress indicator
 │   │   │   ├── SourcesTab.tsx        # Sources/transcripts tab
-│   │   │   ├── TabNavigation.tsx     # Tab switcher (Research, Sources, Trade Log)
+│   │   │   ├── TabNavigation.tsx     # Tab switcher (Research, Briefing, Sources, Trade Log)
 │   │   │   ├── CorpusStats.tsx       # Corpus statistics
 │   │   │   ├── FrequencyTable.tsx    # Word frequency table
 │   │   │   ├── RecentRecordings.tsx  # Recent recordings display
@@ -151,8 +151,8 @@ kalshi-research/
 │   │   ├── url-parser.ts            # Kalshi URL/ticker parser
 │   │   └── ui-utils.ts              # Shared UI utilities (edgeColor, confBadge)
 │   └── types/
-│       ├── research.ts               # Agent result types, orchestrator I/O
-│       ├── components.ts             # UI component types (Event, WordScore, Trade, Cluster, SortKey, etc.)
+│       ├── research.ts               # Agent result types, SynthesisResult (incl. tradeRecommendations), orchestrator I/O
+│       ├── components.ts             # UI component types (Event, WordScore, Trade, Cluster, SortKey, TabId, etc.)
 │       ├── database.ts               # Database row types (DbEvent, DbWord, etc.)
 │       ├── kalshi.ts                 # Kalshi API response types
 │       └── corpus.ts                 # Corpus-related types (MentionHistoryRow, MentionEventDetail)
@@ -294,7 +294,8 @@ All run concurrently via `Promise.allSettled`:
 
 - **Synthesizer** (`synthesizer.ts`) — Combines all agent outputs + corpus mention rates into final per-word scores
 - Produces: probability estimates (historical, agenda, news cycle, base rate, combined), edge vs market price, confidence rating, reasoning, key evidence, and a markdown briefing
-- Outputs `topRecommendations` (strongest yes/no signals) and `researchQuality` assessment
+- Outputs `topRecommendations` (strongest yes/no signals), `researchQuality` assessment, and `tradeRecommendations` (full $100 portfolio construction with limit order prices)
+- The `tradeRecommendations` section is the synthesizer's most actionable output — it constructs a complete trade plan as if it were a human trader with $100 to deploy. See [Trade Recommendations](#trade-recommendations-100-budget) below for full details
 
 ### Model Presets
 
@@ -349,11 +350,11 @@ User pastes Kalshi URL
 
 ### Research Page (`/research/[eventId]`)
 
-Three tabs: **Research**, **Sources**, **Trade Log**
+Four tabs: **Research**, **Briefing**, **Sources**, **Trade Log**
 
 **Research Tab:**
 - `EventHeader` — Event title, speaker, date, duration, status
-- `WordTable` — Primary word analysis table (always visible, see [UI Component Details](#wordtable) below)
+- `WordTable` — Primary word analysis table (always visible, see [UI Component Details](#wordtable) below). Speaker selector is a custom dropdown (not native `<select>`) matching the category filter style.
 - `WordScoresTable` — Detailed AI-generated scores with inline trade form (visible after research completes)
 - `LoggedTrades` — Settled trade results table (visible only when event is resolved, i.e. `isResolved === true`). Shown between WordTable and ResearchNotes for convenient reference while writing post-event notes.
 - `ResearchNotes` — Two side-by-side textareas:
@@ -363,10 +364,14 @@ Three tabs: **Research**, **Sources**, **Trade Log**
   - Stored in `events.pre_event_notes` and `events.post_event_notes`
 - `RecentRecordings` — Recent recordings discovered by the research pipeline. Handles two response shapes from the AI agent: (1) standard `{ recordings: [...] }` with clickable video links, and (2) fallback `{ status: "error", available_content: [...], recommendations: [...] }` when the agent couldn't find direct URLs. The fallback renders a "Recent Events" section showing known events (date, type, participants, sources) without links, plus a "Where to find recordings" list of recommendations.
 - `AgentOutputAccordion` — Expandable sections showing raw output from each AI agent
-- `ResearchBriefing` — AI-generated markdown briefing with top recommendations
 - `ClusterView` — Visual grouping of correlated words
 - `ProgressMessages` — Real-time progress during research pipeline execution
 - `RunHistory` — View/select past research runs
+
+**Briefing Tab:**
+- `ResearchBriefing` — AI-generated research briefing rendered as styled markdown. Contains the full analysis narrative, word-by-word assessment, cluster correlation analysis, and the **Trade Recommendations** section with $100 portfolio construction. See [Trade Recommendations](#trade-recommendations-100-budget) and [ResearchBriefing Component](#researchbriefing-component) sections for full details.
+- Shows research quality footer (transcripts analyzed, sources consulted, confidence level, caveats)
+- Only populated after a research run completes — shows "No briefing available" placeholder otherwise
 
 **Sources Tab:**
 - Transcripts found by historical agent
@@ -673,7 +678,7 @@ interface WordTableProps {
 }
 ```
 
-**Internal state:** `sortKey`, `sortAsc`, `expandedWord`, `catDropdownOpen`, `search`
+**Internal state:** `sortKey`, `sortAsc`, `expandedWord`, `catDropdownOpen`, `speakerDropdownOpen`, `search`
 
 **WordRow interface (internal):**
 ```typescript
@@ -693,6 +698,108 @@ interface WordRow {
 **Table columns (in order):** Word | Yes Price | No Price | Historical Rate | Edge | Sample | expand arrow
 
 **Data flow:** Builds `WordRow[]` by merging `wordScores` + `livePrices` + `mentionRateMap` (from corpus). Also includes "unscored" words from `allWords` that don't have research scores yet (newly added markets). `noPrice` is derived from `livePrices[ticker].noAsk` when available, falling back to `1 - currentPrice`. Filtering pipeline: category filter → search filter → sort.
+
+### Trade Recommendations ($100 Budget)
+
+The synthesizer produces a `tradeRecommendations` field as part of its output, containing a full portfolio construction plan. This is the most actionable part of the research pipeline — it tells the trader exactly what to buy, at what price, and why.
+
+**Design Philosophy:**
+
+The AI acts as an experienced Kalshi mention market trader with $100 to deploy. It does NOT rely on mechanical edge thresholds or automated rules. Instead, it reasons holistically like a human trader — weighing transcript patterns, news cycle momentum, event format, speaker tendencies, recency of word usage, cluster dynamics, and its own judgment. Edge calculations are one signal among many, not a gate.
+
+**Key principles baked into the prompt:**
+1. **Ideal entry prices (limit orders)** — Each trade specifies a target entry price, not the current market price. The trader can set limit orders and wait for fills.
+2. **Portfolio construction** — Diversification across clusters, concentration limits, mix of high-probability/low-payout and low-probability/high-payout trades.
+3. **Cluster correlation awareness** — If "border," "wall," and "immigration" are all correlated, the AI caps exposure to that cluster rather than putting $60 across all of them.
+4. **YES and NO side recommendations** — The AI explicitly recommends which side to take. Many profitable trades are on the NO side.
+5. **Confidence-based sizing** — High conviction = larger positions. Low confidence = smaller or avoid.
+6. **Avoid list** — Words deliberately skipped due to low AI confidence, not because the market price matches. Market price is a signal, not a verdict.
+7. **Dollar/cent formatting** — Allocations and costs use dollars (e.g. "$7.00", "$85.22"). Strike prices use cents (e.g. "28¢", "93¢"). The prompt enforces this: "Buy 25 YES contracts at 28¢ ($7.00)".
+
+**Structured JSON output (`tradeRecommendations` field on `SynthesisResult`):**
+
+```typescript
+tradeRecommendations: {
+  trades: Array<{
+    word: string;
+    ticker: string;
+    side: "yes" | "no";
+    targetEntry: number;      // 0-1 decimal — the limit order price
+    contracts: number;         // Integer count
+    costCents: number;         // targetEntry * 100 * contracts
+    reasoning: string;         // 2-3 sentence mini trade thesis
+    confidence: "high" | "medium" | "low";
+    clusterName: string | null;
+    riskNote: string;          // What could make this trade lose
+    edgeAtTarget: number;      // Probability of winning minus target entry price
+  }>;
+  avoid: Array<{
+    word: string;
+    ticker: string;
+    reasoning: string;         // Why the AI is not trading this word
+  }>;
+  portfolioSummary: {
+    totalDeployed: number;     // Total cents across all trades
+    budgetRemaining: number;   // 10000 - totalDeployed
+    clusterExposure: Array<{
+      cluster: string;
+      amountCents: number;
+      words: string[];
+    }>;
+    riskNotes: string[];       // Portfolio-level risk observations
+    strategy: string;          // 2-3 sentence overall approach summary
+  };
+}
+```
+
+**Cost calculation:** `costCents = targetEntry * 100 * contracts`. For YES trades, `targetEntry` is the YES price. For NO trades, `targetEntry` is the NO price (i.e. `1 - yesPrice`).
+
+**Budget constraint:** The AI targets $70-$90 deployed out of $100, leaving a buffer for limit order adjustments.
+
+**Data flow:** The `tradeRecommendations` JSON is stored in the `research_runs.synthesis_result` JSONB column alongside `wordScores`, `topRecommendations`, and `researchQuality`. It flows through the API unchanged and is available on the frontend via `researchSummary.synthesis`. The human-readable version is embedded in the `briefing` markdown under the heading "## Trade Recommendations ($100 Budget)".
+
+**Rendering:** The trade recommendations appear in two forms:
+1. **Briefing markdown** (Briefing tab) — Human-readable tables, commentary, risk notes, and portfolio summary rendered by `ResearchBriefing`
+2. **Structured JSON** (Agent Raw Outputs → Synthesizer Agent accordion) — Machine-readable data for potential future UI features (e.g. one-click trade logging)
+
+### ResearchBriefing Component
+
+**File:** `src/components/research/ResearchBriefing.tsx`
+
+Renders the AI-generated research briefing as styled markdown in the **Briefing tab**. Uses `react-markdown` with `remark-gfm` (for GFM table support) and explicit component overrides for all markdown elements — no `@tailwindcss/typography` plugin or `prose` classes.
+
+**CRITICAL — Styling approach:** All markdown element styling is done via the `components` prop on `ReactMarkdown`, NOT via CSS classes like `prose`. Each element (h1, h2, h3, p, strong, ul, ol, li, table, th, td, etc.) has an explicit React component override with Tailwind classes. This approach was chosen because:
+- `@tailwindcss/typography` plugin caused global side effects (oversized native `<select>` arrows, broken resize handles across all pages)
+- The styling must match the existing `EventContext` component patterns: `text-xs` for body text, `text-zinc-400` for content, `·` character for bullet points, `px-5 py-4` section padding, `border-zinc-800` borders
+
+**Key styling mappings (must match EventContext patterns):**
+
+| Markdown Element | Component Style |
+|---|---|
+| `## Heading` | `text-sm font-medium text-zinc-300` with bottom border |
+| `### Subheading` | `text-xs text-zinc-500 font-medium` |
+| Paragraph | `text-xs text-zinc-400 leading-relaxed` |
+| `**Bold**` | `text-zinc-200 font-medium` |
+| List items | `·` prefix bullet with `text-xs text-zinc-400` |
+| Tables | `border border-zinc-800 rounded-lg` with `text-xs` cells |
+| Table headers | `bg-zinc-900/50 text-xs font-medium text-zinc-400` |
+
+**Props:**
+```typescript
+interface ResearchBriefingProps {
+  briefing: string | null;
+  researchQuality?: {
+    transcriptsAnalyzed: number;
+    sourcesConsulted: number;
+    overallConfidence: string;
+    caveats: string[];
+  } | null;
+  runTimestamp?: string | null;
+  layer?: string | null;
+}
+```
+
+**Where it's rendered:** In the research page (`src/app/research/[eventId]/page.tsx`) within the `activeTab === "briefing"` conditional. The `briefing` string comes from `latestCompletedRun.briefing` and the `researchQuality` is extracted from `latestCompletedRun.synthesis_result`.
 
 ### QuickTradeTable
 
@@ -1392,6 +1499,39 @@ Understanding which events appear on which page is critical. Each page has a dif
 2. **Kalshi API fills** — The actual fills from the Kalshi exchange. Used by: P&L page only
 
 These two systems are **not synchronized**. A trade on Kalshi does not automatically create a row in the `trades` table. The user must manually log trades in the app for them to appear in Analytics/Trade Analytics.
+
+### Global CSS & Tailwind v4 Gotchas
+
+**File:** `src/app/globals.css`
+
+The app uses Tailwind CSS v4 with the `@import "tailwindcss"` directive. There is a critical global CSS override for native `<select>` elements:
+
+```css
+select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,...");  /* Custom SVG chevron */
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 16px;
+  padding-right: 28px;
+}
+```
+
+**Why this exists:** Tailwind CSS v4's preflight resets render native `<select>` elements with oversized dropdown arrows on macOS. This global override restores compact chevrons matching the custom dropdown buttons used elsewhere in the app. **Do NOT remove this CSS block.**
+
+**CRITICAL — Do NOT install or uninstall CSS/Tailwind packages:**
+- Installing packages like `@tailwindcss/typography` and then uninstalling them can trigger a `.next` cache rebuild that changes how Tailwind preflight renders globally
+- Deleting the `.next` cache forces a full rebuild that may produce different CSS output than the old cache
+- If you need to restart the dev server, use `launchctl kickstart -k gui/$(id -u)/com.kalshi.research` — do NOT delete `.next`
+
+**Styling pattern for new components:** Copy the exact Tailwind classes from `EventContext.tsx` as the reference component. Key patterns:
+- Section headers: `text-sm font-medium text-zinc-300` in a `px-5 py-4 border-b border-zinc-800/50 bg-zinc-900/50` container
+- Body text: `text-xs text-zinc-400 leading-relaxed`
+- Bullet points: `·` character with `text-zinc-600` + content in `text-zinc-400`
+- Cards: `border border-zinc-800 rounded-lg bg-zinc-900/30 overflow-hidden`
+- Badges: `text-xs px-2 py-0.5 rounded-full` with color variants
+
+**Dropdown pattern:** All dropdowns should use the custom button+dropdown pattern (not native `<select>`) for consistent styling. See the categories dropdown in `WordTable.tsx` for the reference implementation: `<button>` with an inline SVG chevron (`w-3 h-3`), `fixed inset-0 z-10` overlay for close-on-click, absolute-positioned dropdown panel. The speaker selector in `WordTable` was converted from a native `<select>` to this pattern to match.
 
 ### Dead Code Policy
 

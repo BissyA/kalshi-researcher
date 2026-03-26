@@ -38,6 +38,7 @@ import { RunHistory } from "@/components/research/RunHistory";
 import { SourcesTab, extractSources } from "@/components/research/SourcesTab";
 import { ResearchNotes } from "@/components/research/ResearchNotes";
 import { QuickTradeTable } from "@/components/research/QuickTradeTable";
+import { ResearchBriefing } from "@/components/research/ResearchBriefing";
 
 export default function ResearchDashboard({
   params,
@@ -514,6 +515,24 @@ export default function ResearchDashboard({
           />
 
           <AgentOutputAccordion researchSummary={researchSummary} />
+        </div>
+      )}
+
+      {/* ── Briefing Tab ── */}
+      {activeTab === "briefing" && (
+        <div className="space-y-6">
+          {latestCompletedRun?.briefing ? (
+            <ResearchBriefing
+              briefing={latestCompletedRun.briefing}
+              researchQuality={(latestCompletedRun.synthesis_result as { researchQuality?: { transcriptsAnalyzed: number; sourcesConsulted: number; overallConfidence: string; caveats: string[] } })?.researchQuality ?? null}
+              runTimestamp={latestCompletedRun.completed_at}
+              layer={latestCompletedRun.layer}
+            />
+          ) : (
+            <div className="border border-zinc-800 rounded-lg bg-zinc-900/30 p-8 text-center">
+              <p className="text-zinc-400 text-sm">No briefing available yet. Run research to generate a briefing.</p>
+            </div>
+          )}
         </div>
       )}
 
