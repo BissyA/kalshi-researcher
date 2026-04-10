@@ -7,6 +7,7 @@ import { MentionSummaryStats } from "@/components/corpus/MentionSummaryStats";
 import { MentionHistoryTable } from "@/components/corpus/MentionHistoryTable";
 import { KalshiMarketsTab } from "@/components/corpus/KalshiMarketsTab";
 import { QuickAnalysisTab } from "@/components/corpus/QuickAnalysisTab";
+import { TranscriptsTab } from "@/components/corpus/TranscriptsTab";
 import type { MentionHistoryRow, SeriesWithStats } from "@/types/corpus";
 
 interface Speaker {
@@ -32,6 +33,9 @@ export default function CorpusPage() {
   // Series state (for Kalshi Markets tab)
   const [series, setSeries] = useState<SeriesWithStats[]>([]);
   const [seriesLoading, setSeriesLoading] = useState(false);
+
+  // Transcript count (for tab badge)
+  const [transcriptCount, setTranscriptCount] = useState(0);
 
   // Derived
   const selectedSpeaker = speakers.find((s) => s.id === selectedSpeakerId);
@@ -118,6 +122,22 @@ export default function CorpusPage() {
   useEffect(() => {
     fetchSeries();
   }, [fetchSeries]);
+
+  // Fetch transcript count when speaker changes
+  const fetchTranscriptCount = useCallback(async () => {
+    if (!selectedSpeakerId) { setTranscriptCount(0); return; }
+    try {
+      const res = await fetch(`/api/transcripts?speakerId=${selectedSpeakerId}&limit=1`);
+      const data = await res.json();
+      setTranscriptCount(data.total ?? 0);
+    } catch {
+      setTranscriptCount(0);
+    }
+  }, [selectedSpeakerId]);
+
+  useEffect(() => {
+    fetchTranscriptCount();
+  }, [fetchTranscriptCount]);
 
   // Handlers
   async function handleAddSpeaker(name: string) {
@@ -218,6 +238,7 @@ export default function CorpusPage() {
         onTabChange={setActiveTab}
         mentionCount={mentionData.length}
         seriesCount={series.length}
+        transcriptCount={transcriptCount}
       />
 
       {/* Mention History Tab */}
@@ -268,6 +289,14 @@ export default function CorpusPage() {
           onDeleteSeries={handleDeleteSeries}
           onImportSeries={handleImportSeries}
           onRemoveEvent={handleRemoveEvent}
+        />
+      )}
+
+      {/* Transcripts Tab */}
+      {activeTab === "transcripts" && (
+        <TranscriptsTab
+          speakerId={selectedSpeakerId}
+          speakerName={selectedSpeaker?.name ?? ""}
         />
       )}
 

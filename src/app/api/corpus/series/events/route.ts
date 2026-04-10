@@ -2,18 +2,60 @@ import { NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase";
 
 // GET: Fetch events for a series, with word results nested
+// Also supports ?speakerId=...&all=1 to fetch ALL events across all series for a speaker
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const seriesId = searchParams.get("seriesId");
+  const speakerId = searchParams.get("speakerId");
+  const all = searchParams.get("all");
 
+  const supabase = getServerSupabase();
+
+  // Mode 1: All events for a speaker (for transcript upload dropdown)
+  if (speakerId && all) {
+    // Get all series for this speaker
+    const { data: seriesList } = await supabase
+      .from("series")
+      .select("id")
+      .eq("speaker_id", speakerId);
+
+    const seriesIds = (seriesList ?? []).map((s) => s.id);
+
+    // Fetch events belonging to any of this speaker's series, OR directly linked by speaker_id
+    let query = supabase
+      .from("events")
+      .select("id, title, kalshi_event_ticker, event_date, status, speaker_id, series_id")
+      .order("event_date", { ascending: false, nullsFirst: false });
+
+    if (seriesIds.length > 0) {
+      query = query.or(`speaker_id.eq.${speakerId},series_id.in.(${seriesIds.join(",")})`);
+    } else {
+      query = query.eq("speaker_id", speakerId);
+    }
+
+    const { data: events, error } = await query;
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({
+      events: (events ?? []).map((e) => ({
+        id: e.id,
+        title: e.title,
+        event_date: e.event_date,
+        eventTicker: e.kalshi_event_ticker,
+        status: e.status,
+      })),
+    });
+  }
+
+  // Mode 2: Events for a specific series (original behavior)
   if (!seriesId) {
     return NextResponse.json(
       { error: "seriesId is required" },
       { status: 400 }
     );
   }
-
-  const supabase = getServerSupabase();
 
   // Fetch events for this series, ordered by most recent first
   const { data: events, error: eventsError } = await supabase

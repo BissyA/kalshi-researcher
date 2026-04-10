@@ -91,13 +91,80 @@ export interface DbWordScore {
 export interface DbTranscript {
   id: string;
   speaker: string;
+  speaker_id: string | null;
+  event_id: string | null;
   event_type: string | null;
   event_date: string | null;
   title: string | null;
   source_url: string | null;
   full_text: string;
+  raw_text: string | null;
+  cleaned_text: string | null;
   word_count: number | null;
   word_frequencies: Record<string, number> | null;
+  cleaning_status: "pending" | "processing" | "cleaned" | "approved";
+  sectioning_status: "pending" | "processing" | "sectioned" | "approved";
+  cleaned_at: string | null;
+  sectioned_at: string | null;
+  needs_review: boolean;
+  review_reason: string | null;
+  completed: boolean;
+  updated_at: string | null;
+  created_at: string;
+}
+
+export interface DbTranscriptSegment {
+  id: string;
+  transcript_id: string;
+  section_id: string | null;
+  order_index: number;
+  text: string;
+  is_speaker_content: boolean;
+  attribution: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbTranscriptSection {
+  id: string;
+  transcript_id: string;
+  title: string;
+  description: string | null;
+  section_type: "remarks" | "qa" | "introduction" | "closing" | "other";
+  category_id: string | null;
+  category_name: string | null;
+  order_index: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbSpeakerCategory {
+  id: string;
+  speaker_id: string;
+  name: string;
+  color: string | null;
+  status: "pending" | "approved";
+  order_index: number;
+  created_at: string;
+}
+
+export interface DbSectionWordDetection {
+  id: string;
+  section_id: string;
+  transcript_id: string;
+  word: string;
+  word_id: string | null;
+  mention_count: number;
+  created_at: string;
+}
+
+export interface DbTranscriptWordDetection {
+  id: string;
+  transcript_id: string;
+  word: string;
+  word_id: string | null;
+  total_count: number;
+  section_count: number;
   created_at: string;
 }
 

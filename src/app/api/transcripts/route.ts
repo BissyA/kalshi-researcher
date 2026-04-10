@@ -4,6 +4,7 @@ import { getServerSupabase } from "@/lib/supabase";
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const speaker = searchParams.get("speaker");
+  const speakerId = searchParams.get("speakerId");
   const type = searchParams.get("type");
   const limit = parseInt(searchParams.get("limit") ?? "50");
   const offset = parseInt(searchParams.get("offset") ?? "0");
@@ -16,7 +17,9 @@ export async function GET(request: Request) {
     .order("event_date", { ascending: false, nullsFirst: false })
     .range(offset, offset + limit - 1);
 
-  if (speaker) {
+  if (speakerId) {
+    query = query.eq("speaker_id", speakerId);
+  } else if (speaker) {
     query = query.ilike("speaker", speaker);
   }
   if (type) {

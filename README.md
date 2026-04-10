@@ -1,6 +1,8 @@
 # Kalshi Research Agent
 
-AI-powered research platform for Kalshi **mention markets** — prediction markets where you bet on whether a specific word will be said during a live event (e.g. a presidential address). The app ingests a Kalshi event URL, runs a multi-agent AI research pipeline to estimate per-word mention probabilities, and presents actionable trading signals with edge calculations.
+AI-powered research platform for Kalshi **mention markets** — prediction markets where you bet on whether a specific word will be said during a live event (e.g. a presidential address). The app combines a transcript-driven research approach with real-time market data to support discretionary trading decisions.
+
+**Strategic pivot:** After ~78 trades showing -$44 P&L (49% win rate, -$0.57 EV per trade), analysis revealed AI-guided trades lost $86.31 while unguided discretionary trades made $42.03. The AI research pipeline was recreating information already priced into the market and giving false confidence. The platform pivoted from AI opinion to structured data: upload real verbatim transcripts, clean/section them with content categories, detect strikes per section, and use the structural patterns to inform better discretionary trading. The briefing tab and trade recommendations have been removed.
 
 ---
 
@@ -12,15 +14,16 @@ AI-powered research platform for Kalshi **mention markets** — prediction marke
 4. [Database Schema (Supabase)](#database-schema-supabase)
 5. [Authentication — Kalshi API](#authentication--kalshi-api)
 6. [AI Research Pipeline](#ai-research-pipeline)
-7. [Pages & Features](#pages--features)
-8. [UI Component Details](#ui-component-details)
-9. [API Routes](#api-routes)
-10. [Key Libraries & Clients](#key-libraries--clients)
-11. [Deployment](#deployment)
-12. [Running Locally](#running-locally)
-13. [Migrations](#migrations)
-14. [Important Patterns & Gotchas](#important-patterns--gotchas)
-15. [Known Kalshi API Breaking Changes](#known-kalshi-api-breaking-changes)
+7. [Transcript Management System](#transcript-management-system)
+8. [Pages & Features](#pages--features)
+9. [UI Component Details](#ui-component-details)
+10. [API Routes](#api-routes)
+11. [Key Libraries & Clients](#key-libraries--clients)
+12. [Deployment](#deployment)
+13. [Running Locally](#running-locally)
+14. [Migrations](#migrations)
+15. [Important Patterns & Gotchas](#important-patterns--gotchas)
+16. [Known Kalshi API Breaking Changes](#known-kalshi-api-breaking-changes)
 
 ---
 
@@ -36,6 +39,7 @@ AI-powered research platform for Kalshi **mention markets** — prediction marke
 | Charts | Recharts 3.7 |
 | Market Data | Kalshi REST API + WebSocket (`ws` ^8.19.0, RSA-PSS auth) |
 | Deployment | Local-only (macOS Launch Agent, `localhost:3000`) |
+| PDF Parsing | pdf-parse 2.4.5 (PDFParse class, explicit worker config for Next.js) |
 | Markdown | react-markdown ^10.1.0 + remark-gfm ^4.0.1 |
 
 ---
@@ -49,7 +53,7 @@ kalshi-research/
 │   │   ├── page.tsx                  # Home — URL input, event loader, research launcher
 │   │   ├── layout.tsx                # Root layout with nav (Corpus, Analytics, Trade Analytics, P&L)
 │   │   ├── research/
-│   │   │   └── [eventId]/page.tsx    # Research output page (tabs: Research, Briefing, Sources, Trade Log)
+│   │   │   └── [eventId]/page.tsx    # Research output page (tabs: Research, Sources, Trade Log)
 │   │   ├── corpus/
 │   │   │   └── page.tsx              # Corpus management (speakers, series, transcripts)
 │   │   ├── analytics/
@@ -88,13 +92,21 @@ kalshi-research/
 │   │       │   ├── kalshi-series/route.ts # GET — search Kalshi series
 │   │       │   ├── import-historical/route.ts # POST — bulk import historical events
 │   │       │   ├── mention-history/route.ts # GET — word mention history
-│   │       │   └── quick-prices/route.ts # GET — quick price lookup
+│   │       │   ├── quick-prices/route.ts # GET — quick price lookup
+│   │       │   ├── speakers/categories/route.ts # GET — list speaker categories
+│   │       │   └── speakers/categories/rename/route.ts # POST — rename category
 │   │       ├── transcripts/
-│   │       │   ├── route.ts          # GET — list transcripts
-│   │       │   ├── upload/route.ts   # POST — upload transcript
+│   │       │   ├── route.ts          # GET — list transcripts (supports speakerId filter)
+│   │       │   ├── upload/route.ts   # POST — upload transcript (text)
+│   │       │   ├── upload-pdf/route.ts # POST — upload PDF transcript (pdf-parse v2)
 │   │       │   ├── frequencies/route.ts # GET — word frequencies
-│   │       │   ├── [id]/route.ts     # GET/DELETE — single transcript
-│   │       │   └── [id]/download/route.ts # GET — download transcript
+│   │       │   ├── [id]/route.ts     # GET/DELETE/PATCH — single transcript
+│   │       │   ├── [id]/download/route.ts # GET — download transcript
+│   │       │   ├── [id]/clean/route.ts # POST — trigger AI cleaning
+│   │       │   ├── [id]/cleaning/route.ts # GET/PATCH — review/approve cleaning
+│   │       │   ├── [id]/sections/route.ts # GET/POST/PATCH — AI sectioning with categories
+│   │       │   ├── [id]/detect-words/route.ts # POST — word detection per section
+│   │       │   └── [id]/word-detections/route.ts # GET — load saved detections
 │   │       ├── settlement/
 │   │       │   └── check/route.ts    # POST — check/re-check market settlement
 │   │       └── ws/
@@ -108,13 +120,13 @@ kalshi-research/
 │   │   ├── market-analysis.ts       # Market pricing analysis
 │   │   ├── recent-recordings.ts     # Recent recording discovery
 │   │   ├── clustering.ts            # Word clustering (uses phase 1 outputs)
-│   │   └── synthesizer.ts           # Final synthesis (combines everything + $100 trade recommendations)
+│   │   └── synthesizer.ts           # Final synthesis (word scores + probabilities, no trade recommendations)
 │   ├── components/
 │   │   ├── research/                 # Research page components
 │   │   │   ├── WordTable.tsx         # Main word table — prices, historical rates, edge, search bar, expandable event details
 │   │   │   ├── WordScoresTable.tsx   # Detailed AI scores grid — probabilities, confidence, trade form (buy/sell), cluster filter
 │   │   │   ├── ResearchNotes.tsx     # Pre/post event notes (auto-save, 800ms debounce)
-│   │   │   ├── ResearchBriefing.tsx  # AI-generated briefing + trade recommendations (markdown, rendered in Briefing tab)
+│   │   │   ├── ResearchBriefing.tsx  # DEPRECATED — was AI-generated briefing (no longer imported/used)
 │   │   │   ├── AgentOutputAccordion.tsx # Expandable per-agent results
 │   │   │   ├── ClusterView.tsx       # Word cluster visualization
 │   │   │   ├── EventHeader.tsx       # Event metadata header
@@ -125,7 +137,7 @@ kalshi-research/
 │   │   │   ├── ResolveEvent.tsx      # Settlement controls + manual resolve + P&L summary (buy-only, P&L-based W/L)
 │   │   │   ├── ProgressMessages.tsx  # Research progress indicator
 │   │   │   ├── SourcesTab.tsx        # Sources/transcripts tab
-│   │   │   ├── TabNavigation.tsx     # Tab switcher (Research, Briefing, Sources, Trade Log)
+│   │   │   ├── TabNavigation.tsx     # Tab switcher (Research, Sources, Trade Log)
 │   │   │   ├── CorpusStats.tsx       # Corpus statistics
 │   │   │   ├── FrequencyTable.tsx    # Word frequency table
 │   │   │   ├── RecentRecordings.tsx  # Recent recordings display
@@ -140,7 +152,12 @@ kalshi-research/
 │   │       ├── MentionHistoryTable.tsx # Word mention history with search bar, expandable event details
 │   │       ├── MentionSummaryStats.tsx # Summary stats for mention data
 │   │       ├── TranscriptSearchBar.tsx # Search bar for transcripts
-│   │       └── CorpusTabNav.tsx      # Corpus page tab navigation
+│   │       ├── CorpusTabNav.tsx      # Corpus page tab navigation (4 tabs: mentions, markets, transcripts, quick)
+│   │       ├── TranscriptsTab.tsx    # Main transcript manager (list + upload + workflow)
+│   │       ├── CleaningStep.tsx      # AI cleaning review with speaker/non-speaker toggles
+│   │       ├── SectioningStep.tsx    # AI sectioning with category approval
+│   │       ├── WordDetectionStep.tsx # Word detection with category-grouped view
+│   │       └── TranscriptResultsView.tsx # Full-width completed transcript view (Structure/Word Analysis/Full Transcript)
 │   ├── hooks/
 │   │   └── useLivePrices.ts          # WebSocket hook for real-time Kalshi prices
 │   ├── lib/
@@ -151,13 +168,13 @@ kalshi-research/
 │   │   ├── url-parser.ts            # Kalshi URL/ticker parser
 │   │   └── ui-utils.ts              # Shared UI utilities (edgeColor, confBadge)
 │   └── types/
-│       ├── research.ts               # Agent result types, SynthesisResult (incl. tradeRecommendations), orchestrator I/O
+│       ├── research.ts               # Agent result types, SynthesisResult, orchestrator I/O
 │       ├── components.ts             # UI component types (Event, WordScore, Trade, Cluster, SortKey, TabId, etc.)
 │       ├── database.ts               # Database row types (DbEvent, DbWord, etc.)
 │       ├── kalshi.ts                 # Kalshi API response types
 │       └── corpus.ts                 # Corpus-related types (MentionHistoryRow, MentionEventDetail)
 ├── supabase/
-│   └── migrations/                   # SQL migrations (001-012, all applied)
+│   └── migrations/                   # SQL migrations (001-016, all applied)
 │       ├── 001_initial_schema.sql    # Core tables: events, words, word_clusters, research_runs,
 │       │                             #   word_scores, transcripts, trades, event_results + views
 │       ├── 002_rls_policies.sql      # Row Level Security policies
@@ -170,7 +187,11 @@ kalshi-research/
 │       ├── 009_event_notes.sql       # events.pre_event_notes, events.post_event_notes
 │       ├── 010_total_cost_real.sql   # trades.total_cost_cents INTEGER → REAL (sub-cent precision)
 │       ├── 011_series_ticker_per_speaker.sql  # UNIQUE(series_ticker) → UNIQUE(series_ticker, speaker_id)
-│       └── 012_sell_trades.sql       # Sell trade support: action, exit_price, matched_buy_ids, matched_contracts, realized_pnl_cents + result CHECK allows 'sold'
+│       ├── 012_sell_trades.sql       # Sell trade support: action, exit_price, matched_buy_ids, matched_contracts, realized_pnl_cents + result CHECK allows 'sold'
+│       ├── 013_transcript_management.sql # Transcript management schema (segments, sections, word detections)
+│       ├── 014_transcript_backfill.sql   # Backfill raw_text, link speaker_id/event_id
+│       ├── 015_speaker_categories.sql    # Speaker categories + category columns on sections + needs_review
+│       └── 016_category_status.sql       # Status column (pending/approved) on speaker_categories
 ├── docs/
 │   └── kalshi-openapi.yaml           # Full Kalshi OpenAPI spec
 ├── Dockerfile                        # Multi-stage Node 22 Alpine build (legacy — from previous Fly.io deployment)
@@ -219,10 +240,15 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 | `word_clusters` | Grouped words by theme | `event_id`, `cluster_name`, `theme`, `correlation_note` |
 | `research_runs` | Research pipeline execution records | `event_id`, `layer`, `status`, `model_used`, `briefing`, all agent result JSONB columns, token/cost tracking |
 | `word_scores` | Per-word probability scores from research | `word_id`, `research_run_id`, probabilities (historical/agenda/news/base/combined), `edge`, `confidence`, `reasoning`, `key_evidence` |
-| `transcripts` | Cached speaker transcripts | `speaker`, `title`, `event_date`, `full_text`, `word_count`, `word_frequencies` |
+| `transcripts` | Speaker transcripts (real verbatim, uploaded via PDF/text) | `speaker`, `speaker_id`, `event_id`, `title`, `event_date`, `full_text`, `raw_text`, `cleaned_text`, `word_count`, `cleaning_status`, `sectioning_status`, `needs_review`, `review_reason`, `completed` |
 | `trades` | Logged trades (buy + sell) | `event_id`, `word_id`, `side`, `action` (buy/sell, default buy), `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL), `result` (win/loss/sold), `pnl_cents` (INTEGER), `exit_price` (REAL, sell only), `matched_buy_ids` (UUID[], sell only), `matched_contracts` (INTEGER, tracks sold qty on buys), `realized_pnl_cents` (REAL, P&L from sells) |
 | `event_results` | Settlement outcomes per word | `event_id`, `word_id`, `was_mentioned` |
 | `speakers` | Registered speakers for corpus | `name` |
+| `transcript_segments` | Atomic text chunks tagged speaker/non-speaker | `transcript_id`, `section_id`, `order_index`, `text`, `is_speaker_content`, `attribution` |
+| `transcript_sections` | Topic sections grouping segments | `transcript_id`, `title`, `description`, `section_type`, `category_id`, `category_name`, `order_index` |
+| `section_word_detections` | Strike word counts per section | `section_id`, `transcript_id`, `word`, `word_id`, `mention_count` |
+| `transcript_word_detections` | Transcript-level word summaries | `transcript_id`, `word`, `word_id`, `total_count`, `section_count` |
+| `speaker_categories` | Per-speaker evolving category list | `speaker_id`, `name`, `color`, `status` (pending/approved), `order_index` |
 | `series` | Kalshi series linked to speakers — one row per (ticker, speaker) pair | `speaker_id`, `series_ticker`, `display_name`, `excluded_tickers`. Unique constraint is `UNIQUE(series_ticker, speaker_id)` — the same Kalshi series (e.g. `KXMENTION`) can be added for multiple speakers independently |
 
 ### Views
@@ -232,7 +258,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 
 ### Migrations
 
-All 12 migrations (001-012) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
+All 16 migrations (001-016) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
 
 ```bash
 curl -s -X POST "https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query" \
@@ -294,10 +320,9 @@ All run concurrently via `Promise.allSettled`:
 ### Phase 3 — Synthesis
 
 - **Synthesizer** (`synthesizer.ts`) — Combines all agent outputs + corpus mention rates into final per-word scores
-- Produces: probability estimates (historical, agenda, news cycle, base rate, combined), edge vs market price, confidence rating, reasoning, key evidence, and a markdown briefing
-- Outputs `topRecommendations` (strongest yes/no signals), `researchQuality` assessment, and `tradeRecommendations` (full $100 portfolio construction with limit order prices)
-- The `tradeRecommendations` section is the synthesizer's most actionable output — it constructs a complete trade plan as if it were a human trader with $100 to deploy. See [Trade Recommendations](#trade-recommendations-100-budget) below for full details
-- **Briefing recovery:** The synthesizer prompt explicitly instructs the model to embed the full briefing inside the JSON `briefing` field (not as separate text before the JSON). However, models occasionally write the briefing as markdown before the JSON block and use a placeholder (e.g. `[Full markdown briefing text above]`) inside the JSON. The orchestrator detects this and recovers the briefing from the raw response text. See [Briefing Placeholder Recovery](#briefing-placeholder-recovery) in Gotchas.
+- Produces: probability estimates (historical, agenda, news cycle, base rate, combined), edge vs market price, confidence rating, reasoning, key evidence
+- Outputs `topRecommendations` (strongest yes/no signals) and `researchQuality` assessment
+- **Note:** The synthesizer previously generated a markdown briefing and $100 trade recommendations. These were removed after analysis showed AI opinions were hurting trading performance (-$86 on AI-guided trades vs +$42 on unguided discretionary trades). The prompt now focuses solely on accurate word probability scoring.
 
 ### Model Presets
 
@@ -342,6 +367,89 @@ User pastes Kalshi URL
 
 ---
 
+## Transcript Management System
+
+The transcript management system is the primary tool for building structured speech data to inform trading decisions. It lives on the Corpus page under the **Transcripts** tab.
+
+### Upload
+
+- **PDF upload** (primary) — drag-and-drop or click to browse. Uses pdf-parse v2 (`PDFParse` class with explicit worker path). Factbase/Roll Call PDFs are auto-cleaned (StressLens labels, page headers/footers, chart artifacts, navigation elements stripped via `cleanFactbaseText()`).
+- **Text paste** (fallback) — for transcripts from other sources.
+- **Event linking** — optional searchable dropdown (600px wide modal) showing ALL events for the speaker across all series (via `GET /api/corpus/series/events?speakerId=X&all=1`). Selecting an event auto-populates title and date. Event title always overrides filename.
+
+### Workflow: Clean → Section → Detect Words
+
+Each step requires explicit approval before advancing. Progress timers show elapsed seconds during AI steps.
+
+**Step 1: Clean Transcript**
+- AI (Claude Haiku 4.5) splits raw text into segments, tagging each as speaker content or non-speaker (reporter questions, moderator remarks, stage directions).
+- User sees segments with green "S" (speaker) / orange "X" (non-speaker) toggle buttons.
+- Non-speaker content is KEPT for context but excluded from word detection.
+- Quotes/readings by the speaker count as speaker content (maps to Kalshi resolution rules — the word was physically said by the speaker).
+- "Save Changes" persists toggles without advancing. "Approve Cleaning" locks in the cleaning and advances to sectioning.
+- "Re-clean" reruns the AI from scratch (costs another Haiku call).
+- Metadata-only transcripts (<200 chars) show a warning and block the clean button.
+
+**Step 2: Section Transcript**
+- AI (Claude Haiku 4.5) groups segments into logical topic sections with: title, description, `section_type` (remarks/qa/introduction/closing/other), and content `category`.
+- **section_type** describes FORMAT (was it a Q&A exchange?). **category** describes CONTENT (was it about foreign policy?). These are independent — a Q&A about Iran has `section_type: "qa"` and `category: "Foreign Policy"`.
+- Per-speaker category system with pending/approved flow (see Speaker Categories below).
+- User can: reassign categories (custom dropdown), rename categories (✎ button, propagates everywhere), remove categories (× button), change section types (native select).
+- New categories must all be approved/rejected before sections can be approved.
+- "Re-section" clears pending categories and reruns AI.
+
+**Step 3: Detect Words**
+- Pure regex matching — no AI, no cost, instant.
+- If transcript is linked to a Kalshi event, pulls word list from that event's `words` table. Otherwise accepts manual word list (one per line).
+- Scans only `is_speaker_content = true` segments per section.
+- Handles slash-separated variants: "Afford / Affordable / Affordability" matches all three.
+- Results stored in `section_word_detections` (per-section counts) and `transcript_word_detections` (transcript totals).
+- **Save Transcript** — marks `completed = true`, returns to transcript list.
+- **Discard Transcript** — deletes everything (transcript + segments + sections + detections) after confirmation.
+
+### Speaker Categories
+
+Categories are per-speaker and evolve organically:
+
+1. **First transcript** — AI proposes categories based on content (e.g. "Foreign Policy", "Military / Defense", "Economy"). Categories are about CONTENT topics, never structural labels like "Opening" or "Q&A".
+2. **Subsequent transcripts** — AI receives existing approved categories and assigns sections to them. Proposes new categories only if a section genuinely doesn't fit any existing category.
+3. **Pending categories** — written to `speaker_categories` with `status = 'pending'` immediately when AI proposes them. Persist across page refreshes (stored in DB, loaded on mount).
+4. **Approval banner** — amber banner in sectioning step showing each pending category with ✓ (approve) and ✗ (reject) buttons. Double-click to rename before approving.
+5. **Approval** — sets `status = 'approved'`. Category permanently available for this speaker.
+6. **Rejection** — deletes category from `speaker_categories`, clears `category_name` from any sections using it.
+7. **Rename** — double-click in banner or ✎ on section card. Propagates to all sections across all transcripts + `speaker_categories` row via `POST /api/corpus/speakers/categories/rename`.
+8. **Retro-classification** — when new categories are approved, other completed transcripts for the speaker are flagged with `needs_review = true` and a review banner.
+9. **Re-sectioning** clears all pending categories first to avoid duplicates.
+
+**Table:** `speaker_categories` — `id`, `speaker_id`, `name`, `color`, `status` (pending/approved), `order_index`, `created_at`. Unique on `(speaker_id, name)`.
+
+### Completed Transcript View (TranscriptResultsView)
+
+Full-width read-only view for transcripts with `completed = true`. Replaces the workflow panel.
+
+**Structure Tab:**
+- Category bar — colored pills with section count. Hover to preview topics, click to pin/filter.
+- Distribution bar — proportional horizontal segments by speaker word count per category, color-coded. Hover shows tooltip. Click pins category.
+- Strikes bar — detected words with total counts. Hover highlights sections, click to pin.
+- Pin system: click to lock filter (white ring outline), click again to unpin. Multiple pins supported. Hover works on top of pins. "Clear filters" button when anything pinned.
+- Sections in chronological speech order (default) or grouped by category (toggle: "Speech Order" / "By Category").
+- Each section card: title, category badge (colored), section_type badge (subtle grey), description, strike tags with counts. Left border color-coded by category.
+- Expand any section to read the actual transcript text (speaker content normal, non-speaker greyed/italic with attribution).
+- Header shows: title, date, word count, section count, "X YESs & Y NOs".
+
+**Word Analysis Tab:**
+- Table of all strike words from the linked Kalshi event (not all speaker corpus words).
+- Columns: Word, Mentioned (YES/NO badge), Count, Sections (X/Y with %), Dom. Category (colored badge), R/Q (remarks vs qa breakdown e.g. "6r / 3q"), Kalshi Rate (from corpus mention history, color-coded), Sample (e.g. "22/41").
+- Sortable by Word, Count, Sections, Kalshi Rate. Searchable.
+- Words from event not found in transcript shown with red NO badge — helps identify what was expected but absent.
+
+**Full Transcript Tab:**
+- Plain reading view of all segments in chronological order.
+- Green "S" / orange "X" badges per segment (matching cleaning step style).
+- Non-speaker content greyed/italic with orange left border and attribution labels.
+
+---
+
 ## Pages & Features
 
 ### Home Page (`/`)
@@ -354,7 +462,7 @@ User pastes Kalshi URL
 
 ### Research Page (`/research/[eventId]`)
 
-Four tabs: **Research**, **Briefing**, **Sources**, **Trade Log**
+Three tabs: **Research**, **Sources**, **Trade Log** (Briefing tab removed — see strategic pivot note above)
 
 **Research Tab:**
 - `EventHeader` — Event title, speaker, date, duration, status
@@ -372,10 +480,8 @@ Four tabs: **Research**, **Briefing**, **Sources**, **Trade Log**
 - `ProgressMessages` — Real-time progress during research pipeline execution
 - `RunHistory` — View/select past research runs
 
-**Briefing Tab:**
-- `ResearchBriefing` — AI-generated research briefing rendered as styled markdown. Contains the full analysis narrative, word-by-word assessment, cluster correlation analysis, and the **Trade Recommendations** section with $100 portfolio construction. See [Trade Recommendations](#trade-recommendations-100-budget) and [ResearchBriefing Component](#researchbriefing-component) sections for full details.
-- Shows research quality footer (transcripts analyzed, sources consulted, confidence level, caveats)
-- Only populated after a research run completes — shows "No briefing available" placeholder otherwise
+**Briefing Tab — REMOVED:**
+The Briefing tab has been removed. Analysis showed AI-generated opinions were hurting trading performance (-$86.31 on AI-guided trades vs +$42.03 on unguided). The `ResearchBriefing` component still exists in the codebase but is no longer imported or rendered.
 
 **Sources Tab:**
 - Transcripts found by historical agent
@@ -393,10 +499,12 @@ Four tabs: **Research**, **Briefing**, **Sources**, **Trade Log**
 
 ### Corpus Page (`/corpus`)
 
+Four tabs: **Mention History**, **Kalshi Markets**, **Transcripts**, **Quick Analysis**
+
 - Manage speakers and their associated Kalshi series
 - Import historical events from Kalshi series
 - View mention rates across past events (with search bar for filtering words)
-- Upload and manage transcripts
+- **Transcripts tab** — upload, clean, section, and analyze transcripts per speaker. PDF upload (Factbase/Roll Call) or text paste. 3-step workflow with AI cleaning and sectioning. Speaker category management. Completed transcripts open in full-width results view. See [Transcript Management System](#transcript-management-system) for full details.
 - Quick analysis tools
 - Category-based filtering
 
@@ -711,9 +819,11 @@ interface WordRow {
 
 **Data flow:** Builds `WordRow[]` by merging `wordScores` + `livePrices` + `mentionRateMap` (from corpus). Also includes "unscored" words from `allWords` that don't have research scores yet (newly added markets). `noPrice` is derived from `livePrices[ticker].noAsk` when available, falling back to `1 - currentPrice`. Filtering pipeline: category filter → search filter → sort.
 
-### Trade Recommendations ($100 Budget)
+### Trade Recommendations ($100 Budget) — REMOVED
 
-The synthesizer produces a `tradeRecommendations` field as part of its output, containing a full portfolio construction plan. This is the most actionable part of the research pipeline — it tells the trader exactly what to buy, at what price, and why.
+**This feature has been removed.** Analysis showed AI trade recommendations were hurting performance (-$86.31 on 45 AI-guided trades vs +$42.03 on 33 unguided trades). The synthesizer prompt no longer generates trade recommendations or briefings. The section below is retained for historical reference only.
+
+The synthesizer previously produced a `tradeRecommendations` field as part of its output, containing a full portfolio construction plan. This is the most actionable part of the research pipeline — it tells the trader exactly what to buy, at what price, and why.
 
 **Design Philosophy:**
 
@@ -774,11 +884,13 @@ tradeRecommendations: {
 1. **Briefing markdown** (Briefing tab) — Human-readable tables, commentary, risk notes, and portfolio summary rendered by `ResearchBriefing`
 2. **Structured JSON** (Agent Raw Outputs → Synthesizer Agent accordion) — Machine-readable data for potential future UI features (e.g. one-click trade logging)
 
-### ResearchBriefing Component
+### ResearchBriefing Component — DEPRECATED
+
+**Note:** The Briefing tab that rendered this component has been removed from the research page. This component still exists in the codebase but is no longer imported or used.
 
 **File:** `src/components/research/ResearchBriefing.tsx`
 
-Renders the AI-generated research briefing as styled markdown in the **Briefing tab**. Uses `react-markdown` with `remark-gfm` (for GFM table support) and explicit component overrides for all markdown elements — no `@tailwindcss/typography` plugin or `prose` classes.
+Previously rendered the AI-generated research briefing as styled markdown in the **Briefing tab**. Uses `react-markdown` with `remark-gfm` (for GFM table support) and explicit component overrides for all markdown elements — no `@tailwindcss/typography` plugin or `prose` classes.
 
 **CRITICAL — Styling approach:** All markdown element styling is done via the `components` prop on `ReactMarkdown`, NOT via CSS classes like `prose`. Each element (h1, h2, h3, p, strong, ul, ol, li, table, th, td, etc.) has an explicit React component override with Tailwind classes. This approach was chosen because:
 - `@tailwindcss/typography` plugin caused global side effects (oversized native `<select>` arrows, broken resize handles across all pages)
@@ -983,16 +1095,25 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | `/api/corpus/mention-history` | GET | Get word mention history |
 | `/api/corpus/kalshi-series` | GET | Search Kalshi for series |
 | `/api/corpus/quick-prices` | GET | Quick market price lookup. Returns `yesBid`, `yesAsk`, `noAsk`, `lastPrice`, `volume` per market |
+| `/api/corpus/speakers/categories` | GET | List speaker categories. Supports `?speakerId=X&status=pending` filter |
+| `/api/corpus/speakers/categories/rename` | POST | Rename a category everywhere — updates `speaker_categories` row + all `transcript_sections` across speaker's transcripts |
+| `/api/corpus/series/events` | GET | Now supports `?speakerId=X&all=1` to return ALL events across all series for a speaker (for transcript upload dropdown) |
 
 ### Transcripts
 
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/api/transcripts` | GET | List transcripts |
-| `/api/transcripts/upload` | POST | Upload a transcript |
+| `/api/transcripts` | GET | List transcripts (supports `speakerId` filter) |
+| `/api/transcripts/upload` | POST | Upload a transcript (text) |
+| `/api/transcripts/upload-pdf` | POST | Upload PDF transcript (pdf-parse v2, factbase text cleaning) |
 | `/api/transcripts/frequencies` | GET | Get word frequencies across transcripts |
-| `/api/transcripts/[id]` | GET/DELETE | Get or delete a transcript |
+| `/api/transcripts/[id]` | GET/DELETE/PATCH | Get, delete, or update transcript (needs_review, completed flags) |
 | `/api/transcripts/[id]/download` | GET | Download transcript text |
+| `/api/transcripts/[id]/clean` | POST | Trigger AI cleaning (Haiku 4.5). Returns segments. |
+| `/api/transcripts/[id]/cleaning` | GET/PATCH | Get cleaning state (segments + status); approve or adjust segments |
+| `/api/transcripts/[id]/sections` | GET/POST/PATCH | List sections; trigger AI sectioning with categories; approve/adjust sections and categories |
+| `/api/transcripts/[id]/detect-words` | POST | Run word detection across approved sections. Accepts optional `eventId` or `words` array. |
+| `/api/transcripts/[id]/word-detections` | GET | Load saved word detection results (section-level + totals) |
 
 ### Other
 
@@ -1228,6 +1349,10 @@ All migrations are in `supabase/migrations/` and have been applied to the live d
 | 010 | `010_total_cost_real.sql` | `trades.total_cost_cents` changed from `INTEGER` to `REAL` for sub-cent precision |
 | 011 | `011_series_ticker_per_speaker.sql` | Changed `series.series_ticker` uniqueness from global `UNIQUE` to `UNIQUE(series_ticker, speaker_id)`. Fixes: Kalshi series like `KXMENTION` that cover multiple speakers can now be added independently per speaker. Previously, adding the same ticker for a second speaker would throw a 409 "already exists" error. |
 | 012 | `012_sell_trades.sql` | Sell trade support. Adds: `action TEXT NOT NULL DEFAULT 'buy'` (CHECK: buy/sell), `exit_price REAL`, `matched_buy_ids UUID[]`, `matched_contracts INTEGER DEFAULT 0`, `realized_pnl_cents REAL`. Widens `result` CHECK to include `'sold'`. Adds index `idx_trades_word_action` on `(word_id, action, side)` for FIFO lookups. All existing trades get `action='buy'` and `matched_contracts=0` via defaults — full backwards compatibility. |
+| 013 | `013_transcript_management.sql` | Transcript management schema: new columns on `transcripts` (`speaker_id`, `event_id`, `raw_text`, `cleaned_text`, `cleaning_status`, `sectioning_status`, `cleaned_at`, `sectioned_at`, `updated_at`), 4 new tables (`transcript_segments`, `transcript_sections`, `section_word_detections`, `transcript_word_detections`), indexes, RLS policies |
+| 014 | `014_transcript_backfill.sql` | Backfill `raw_text` from `full_text`, link `speaker_id` by matching speaker name, link `event_id` by matching speaker + date |
+| 015 | `015_speaker_categories.sql` | `speaker_categories` table with `speaker_id`, `name`, `color`, `order_index`. Adds `category_id`/`category_name` on `transcript_sections`. Adds `needs_review`/`review_reason` on `transcripts`. RLS policies. |
+| 016 | `016_category_status.sql` | Adds `status TEXT NOT NULL DEFAULT 'approved'` (CHECK: pending/approved) to `speaker_categories` for the category approval flow |
 
 To apply new migrations, use the Supabase Management API (never ask the user to do it manually):
 
@@ -1400,7 +1525,9 @@ interface PriceData {
 - `EventContext` is a presentational component (not a React context) that displays event format, agenda, news cycle, and trending topics from phase 1 agent results
 - `LoggedTrades` appears in **two locations**: Research tab (when settled, for note-writing convenience) and Trade Log tab (always)
 
-### Briefing Placeholder Recovery
+### Briefing Placeholder Recovery — HISTORICAL
+
+**Note:** The briefing feature has been removed. This section is retained for historical reference only.
 
 **Problem:** When asking Claude to return a long markdown briefing (800-1500 words) inside a JSON `briefing` field, the model sometimes writes the briefing as markdown prose BEFORE the JSON block, then puts a placeholder like `[Full markdown briefing text above]` inside the JSON field. Since `parseJsonResponse` only extracts the JSON, the actual briefing text is lost.
 
@@ -1650,6 +1777,44 @@ select {
 
 **Dropdown pattern:** All dropdowns should use the custom button+dropdown pattern (not native `<select>`) for consistent styling. See the categories dropdown in `WordTable.tsx` for the reference implementation: `<button>` with an inline SVG chevron (`w-3 h-3`), `fixed inset-0 z-10` overlay for close-on-click, absolute-positioned dropdown panel. The speaker selector in `WordTable` was converted from a native `<select>` to this pattern to match.
 
+### pdf-parse v2 Worker Configuration
+
+pdf-parse v2 requires explicit worker path configuration in the Next.js dev server environment:
+
+```typescript
+const workerPath = path.resolve("node_modules/pdf-parse/dist/worker/pdf.worker.mjs");
+PDFParse.setWorker(workerPath);
+const parser = new PDFParse({ data: buffer });
+const result = await parser.getText();
+await parser.destroy();
+```
+
+Without `setWorker()`, you get "Cannot find module pdf.worker.mjs" error. The v2 API uses `new PDFParse({ data: buffer })` then `.getText()` then `.destroy()` — completely different from v1's `pdfParse(buffer)`. The worker file exists at `node_modules/pdf-parse/dist/worker/pdf.worker.mjs`. Server restart required after creating the route file.
+
+### Kalshi Date Off-by-One (Recurring Events)
+
+Kalshi's `sub_title` dates for recurring events (e.g. Leavitt press briefings) are consistently ~1 day off from actual event dates. For example, a briefing that aired March 31 per the White House YouTube stream shows as "Mar 30, 2026" in Kalshi's `sub_title`. The app stores Kalshi's dates as-is — this is a Kalshi data quality issue, not something we can fix.
+
+### Transcript Completion Lifecycle
+
+```
+Upload → Clean → Approve Cleaning → Section → Approve Categories → Approve Sections → Detect Words → Save Transcript (completed=true)
+```
+
+Only transcripts with `completed = true` show in the full-width `TranscriptResultsView`. In-progress transcripts show the step-by-step workflow panel. The transcript list shows a green "completed" badge for finished transcripts, or individual step status badges (pending/cleaned/approved) for in-progress ones.
+
+### Category Approval Flow
+
+New categories are written to `speaker_categories` with `status = 'pending'` immediately when the AI proposes them during sectioning. They persist across page refreshes (stored in DB, loaded on component mount via `GET /api/corpus/speakers/categories?speakerId=X&status=pending`). The sectioning step shows a banner for pending categories. All pending categories must be resolved (approved or rejected) before sections can be approved. Re-sectioning deletes all pending categories first to avoid duplicates from previous runs.
+
+### Cached Transcripts Deleted
+
+All 138 AI-cached summary transcripts from the historical research agent were deleted. These were one-line descriptions (e.g. "11th Cabinet meeting discussing Iran war developments..."), not real transcripts. The `word_count` field on these was an AI estimate, not derived from actual text. The transcript system now only stores real verbatim transcripts uploaded by the user via PDF or text paste.
+
+### Bulk Series Import
+
+All speakers' series were bulk-imported from Kalshi during this session. This pulls all settled events with their word results. To keep event lists current, periodically run an import across all series (the `/api/corpus/import-historical` endpoint handles individual series).
+
 ### Dead Code Policy
 
 - Unused components should be deleted, not left in the codebase
@@ -1699,3 +1864,114 @@ GET /api/pnl/debug
 ```
 
 Check: do the raw fills have `count` (old) or `count_fp` (new)? Do they have `yes_price` (old) or `yes_price_dollars` (new)? Update `normalizeFill()` accordingly.
+
+---
+
+## Current Status & Next Steps
+
+### What's been built
+
+**Transcript Management System (Corpus page → Transcripts tab):**
+- PDF upload with factbase/Roll Call text cleaning, event linking with auto-populate
+- 3-step workflow: AI Clean (speaker/non-speaker tagging) → AI Section (topic sections with content categories) → Detect Words (regex strike detection per section)
+- Per-speaker category system with pending/approved flow, rename propagation, retro-classification flagging
+- Completed transcript results view with three tabs:
+  - Structure: category bar + distribution bar + strikes bar + chronological/category-grouped sections with hover/pin filtering
+  - Word Analysis: table with Mentioned, Count, Sections (spread), Dom. Category, R/Q breakdown, Kalshi Rate, Sample
+  - Full Transcript: plain reading view with speaker/non-speaker badges
+
+**Research Pipeline Changes:**
+- Briefing tab removed from research page (3 tabs remain: Research, Sources, Trade Log)
+- Trade recommendations removed from synthesizer prompt (~140 lines of prompt stripped)
+- Synthesizer now produces only: wordScores, topRecommendations, researchQuality
+- Saves significant tokens per research run
+
+**Data & Infrastructure:**
+- Bulk corpus import for all 14 speakers across 30 series
+- Event date corrections from Kalshi sub_title for recurring events
+- All 138 AI-cached summary transcripts deleted (clean slate for real transcripts)
+- Migrations 013-016 applied (5 new tables, modified transcripts table)
+
+### Next Steps
+
+#### 1. Similar Events Comparison Panel (Research Page)
+
+**Goal:** When trading a new Kalshi event, be able to select comparable past events and see their transcript structure side by side with the current event's word list and prices.
+
+**Design (agreed upon):**
+
+This lives on the research page as part of Approach A — integrated into the research flow, not a standalone corpus tool. The workflow:
+
+1. User loads a new event (e.g. upcoming Leavitt briefing) on the research page
+2. User triggers research (gets market prices, historical rates, event format — the useful data)
+3. A "Similar Events" panel on the research page lets the user select past events to compare against
+4. The selection is manual/curated — the user picks which 3-5 past transcripts are most comparable. The AI may suggest some, but the user makes the final selection. This is deliberate: automated similarity matching optimizes for surface features (same speaker, similar title) when what matters is format, context, and political moment.
+5. Selected transcripts' structure views appear inline — categories, sections, strike patterns — alongside the current event's word list and live prices
+
+**Key data points the comparison should surface:**
+- For each strike word on the current event: how many of the selected past events mentioned it, in which sections, remarks vs Q&A
+- Category distribution comparison: "Past briefings spent ~30% on Foreign Policy, ~20% on DHS. If this briefing follows the same pattern, these words are likely..."
+- Structural patterns: "Iran always comes up in opening remarks. Border only appears in Q&A. Hormuz is rare — only 1 of 5 briefings."
+- Recency trends: "China was mentioned in the last 4 consecutive briefings but not before that — pattern shift"
+
+**UI concept:**
+- Dropdown/multi-select to pick past transcripts for this speaker (filtered to same series or similar event types)
+- Compact comparison view showing: event title, date, category distribution bar, and per-word mention matrix (words as rows, selected events as columns, counts in cells)
+- Hover a word → highlights which past events contained it and in which sections
+- This replaces what the AI briefing was trying to do (synthesize patterns across events) but with raw data the trader can interpret themselves
+
+**What needs to be built:**
+- New component: `SimilarEventsPanel` or similar, on the research page
+- API to fetch transcript data (sections + word detections) for multiple transcripts in one call
+- UI for selecting comparable events (filtered by speaker, with transcript completion status visible)
+- Comparison matrix view: words × events with section-level detail
+- Integration with live prices from the existing `useLivePrices` hook and word analysis table
+- Storage: save the selected "comparison set" per event so the user doesn't have to re-select each time
+
+**Critical design principle:** The comparison panel provides DATA, not OPINIONS. No AI-generated probability estimates, no "recommended trades", no synthesized narrative. The trader looks at the structural patterns, compares against current market prices, and forms their own thesis. This directly addresses the finding that AI opinions were -EV.
+
+#### 2. Integration of Transcript Data into Research Page Trading Flow
+
+**Goal:** The research page becomes: market data + transcript comparisons + trade logging. The AI pipeline still runs for prices and historical rates, but the trader's primary research input is the transcript structure data.
+
+**Proposed research page flow (post-integration):**
+
+```
+1. Load event → see word list with live prices
+2. Trigger research → get market prices, historical corpus rates, event format
+3. Open Similar Events panel → select comparable past transcripts
+4. Study the comparison → structural patterns, category distributions, word frequency across events
+5. Form thesis → "Iran will be mentioned (always in remarks), Hormuz unlikely (only 1/5), TSA likely (DHS is hot topic)"
+6. Switch to Trade Log tab → log trades based on thesis + prices
+7. Write pre-event notes → capture reasoning for post-event review
+```
+
+**What changes on the research page:**
+- The Word Analysis table (WordTable component) should incorporate transcript mention data alongside Kalshi corpus rates — so you see both "Kalshi says 62% historical" AND "mentioned in 4/5 comparable transcripts, always in remarks sections"
+- The Similar Events panel may replace or sit alongside the existing EventContext component (which shows AI-generated event format/agenda/news cycle analysis)
+- The Sources tab could link to the full transcript views on the corpus page for deep-dive reading
+
+**What stays the same:**
+- Word prices (live via WebSocket)
+- Historical corpus rates (from Kalshi settled events)
+- Trade logging (QuickTradeTable / WordScoresTable)
+- Settlement checking
+- Pre/post event notes
+
+#### 3. Ongoing Transcript Corpus Building
+
+The transcript system is only valuable with data. Priority speakers for transcript uploads:
+- **Karoline Leavitt** — primary test case, recurring press briefings, factbase PDFs available
+- **Donald Trump** — highest trade volume, varied event formats
+- Other speakers as trading opportunities arise
+
+Each transcript takes ~2-3 minutes to process (upload PDF → clean → approve → section → approve categories → detect words → save). The more transcripts per speaker, the more useful the comparison panel becomes.
+
+#### 4. Historical Agent Transcript Caching (Consider Removing)
+
+The historical agent (`src/agents/historical.ts`) previously cached transcript summaries in the `transcripts` table. Those cached summaries have been deleted and the transcript system now only stores real verbatim transcripts. The historical agent still runs during research and searches the web for transcripts, but its caching behavior now conflicts with the new transcript system (it would create stub entries that aren't real transcripts).
+
+Options:
+- Strip the transcript caching from the orchestrator (lines 130-148 in `orchestrator.ts` + the upsert after historical agent completes). The agent still searches for transcripts and returns findings, but doesn't write to the DB.
+- Leave as-is but add a filter in the TranscriptsTab to hide entries with `cleaning_status = 'pending'` and `word_count < 200` (effectively hiding stubs). This is fragile.
+- Recommended: strip the caching. The user now manually uploads real transcripts. The historical agent's web search results are still useful as research context, they just don't need to be stored as transcript records.
