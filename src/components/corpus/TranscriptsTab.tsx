@@ -531,9 +531,14 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
                 </div>
                 <div className="flex items-center gap-1.5 mt-1">
                   {t.completed ? (
+                    <>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-900/30 text-green-400">
                       completed
                     </span>
+                    {t.word_count && t.word_count > 0 && (
+                      <span className="text-[10px] text-zinc-600">~{Math.round(t.word_count / 145)} min</span>
+                    )}
+                    </>
                   ) : (
                     <>
                       {statusBadge(t.cleaning_status)}

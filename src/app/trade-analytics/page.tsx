@@ -48,15 +48,21 @@ interface SpeakerData {
 export default function TradeAnalyticsPage() {
   const [speakers, setSpeakers] = useState<SpeakerData[]>([]);
   const [allData, setAllData] = useState<SpeakerData | null>(null);
-  const [selectedSpeaker, setSelectedSpeaker] = useState<string>("all");
+  const [selectedSpeaker, setSelectedSpeaker] = useState<string>(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("kalshi-ta-speaker") ?? "all";
+    return "all";
+  });
   const [expandedWords, setExpandedWords] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [strategy, setStrategy] = useState<"v2" | "v1">("v2");
+
+  useEffect(() => { localStorage.setItem("kalshi-ta-speaker", selectedSpeaker); }, [selectedSpeaker]);
 
   useEffect(() => {
     async function fetchData() {
       try {
-        const res = await fetch("/api/analytics/trade-analytics");
+        const res = await fetch(`/api/analytics/trade-analytics?strategy=${strategy}`);
         if (res.ok) {
           const data = await res.json();
           setSpeakers(data.speakers);
@@ -69,7 +75,7 @@ export default function TradeAnalyticsPage() {
       }
     }
     fetchData();
-  }, []);
+  }, [strategy]);
 
   if (loading) {
     return (
@@ -107,7 +113,23 @@ export default function TradeAnalyticsPage() {
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-white">Trade Analytics</h1>
+        <div className="flex items-center gap-4">
+          <h1 className="text-2xl font-bold text-white">Trade Analytics</h1>
+          <div className="flex items-center gap-1 bg-zinc-800 rounded-lg p-0.5">
+            <button
+              onClick={() => setStrategy("v2")}
+              className={`text-xs px-3 py-1.5 rounded-md transition-colors ${strategy === "v2" ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-zinc-300"}`}
+            >
+              V2 (Current)
+            </button>
+            <button
+              onClick={() => setStrategy("v1")}
+              className={`text-xs px-3 py-1.5 rounded-md transition-colors ${strategy === "v1" ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-zinc-300"}`}
+            >
+              V1 (Legacy)
+            </button>
+          </div>
+        </div>
         <SpeakerSelect
           speakers={speakers}
           selected={selectedSpeaker}

@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const strategy = searchParams.get("strategy") ?? "v2";
+
   const supabase = getServerSupabase();
 
-  // Fetch all trades
-  const { data: allTrades } = await supabase.from("trades").select("*");
+  // Fetch trades filtered by strategy
+  const { data: allTrades } = await supabase.from("trades").select("*").eq("strategy", strategy);
   if (!allTrades || allTrades.length === 0) {
     return NextResponse.json({ speakers: [], all: null });
   }

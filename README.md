@@ -96,7 +96,8 @@ kalshi-research/
 │   │       │   ├── import-historical/route.ts # POST — bulk import historical events
 │   │       │   ├── mention-history/route.ts # GET — word mention history
 │   │       │   ├── quick-prices/route.ts # GET — quick price lookup
-│   │       │   ├── speakers/categories/route.ts # GET — list speaker categories
+│   │       │   ├── bulk-import/route.ts # POST — bulk import all series for all speakers
+│   │       │   ├── speakers/categories/route.ts # GET/POST — list or create speaker categories
 │   │       │   └── speakers/categories/rename/route.ts # POST — rename category
 │   │       ├── transcripts/
 │   │       │   ├── route.ts          # GET — list transcripts (supports speakerId filter)
@@ -111,7 +112,8 @@ kalshi-research/
 │   │       │   ├── [id]/cleaning/route.ts # GET/PATCH — review/approve cleaning
 │   │       │   ├── [id]/sections/route.ts # GET/POST/PATCH — AI sectioning with categories
 │   │       │   ├── [id]/detect-words/route.ts # POST — word detection per section
-│   │       │   └── [id]/word-detections/route.ts # GET — load saved detections
+│   │       │   ├── [id]/word-detections/route.ts # GET — load saved detections
+│   │       │   └── [id]/split-segment/route.ts # POST — split a segment at text selection
 │   │       ├── settlement/
 │   │       │   └── check/route.ts    # POST — check/re-check market settlement
 │   │       └── ws/
@@ -183,7 +185,7 @@ kalshi-research/
 │       ├── kalshi.ts                 # Kalshi API response types
 │       └── corpus.ts                 # Corpus-related types (MentionHistoryRow, MentionEventDetail)
 ├── supabase/
-│   └── migrations/                   # SQL migrations (001-017, all applied)
+│   └── migrations/                   # SQL migrations (001-018, all applied)
 │       ├── 001_initial_schema.sql    # Core tables: events, words, word_clusters, research_runs,
 │       │                             #   word_scores, transcripts, trades, event_results + views
 │       ├── 002_rls_policies.sql      # Row Level Security policies
@@ -201,7 +203,8 @@ kalshi-research/
 │       ├── 014_transcript_backfill.sql   # Backfill raw_text, link speaker_id/event_id
 │       ├── 015_speaker_categories.sql    # Speaker categories + category columns on sections + needs_review
 │       ├── 016_category_status.sql       # Status column (pending/approved) on speaker_categories
-│       └── 017_event_transcript_sets.sql # Named transcript groups for the Transcript tab
+│       ├── 017_event_transcript_sets.sql # Named transcript groups for the Transcript tab
+│       └── 018_trade_strategy.sql    # trades.strategy TEXT DEFAULT 'v1' (v1=legacy, v2=current) + index
 ├── docs/
 │   └── kalshi-openapi.yaml           # Full Kalshi OpenAPI spec
 ├── Dockerfile                        # Multi-stage Node 22 Alpine build (legacy — from previous Fly.io deployment)
@@ -251,7 +254,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 | `research_runs` | Research pipeline execution records | `event_id`, `layer`, `status`, `model_used`, `briefing`, all agent result JSONB columns, token/cost tracking |
 | `word_scores` | Per-word probability scores from research | `word_id`, `research_run_id`, probabilities (historical/agenda/news/base/combined), `edge`, `confidence`, `reasoning`, `key_evidence` |
 | `transcripts` | Speaker transcripts (real verbatim, uploaded via PDF/text/YouTube) | `speaker`, `speaker_id`, `event_id`, `title`, `event_date`, `full_text`, `raw_text`, `cleaned_text`, `word_count`, `cleaning_status`, `sectioning_status`, `needs_review`, `review_reason`, `completed` |
-| `trades` | Logged trades (buy + sell) | `event_id`, `word_id`, `side`, `action` (buy/sell, default buy), `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL), `result` (win/loss/sold), `pnl_cents` (INTEGER), `exit_price` (REAL, sell only), `matched_buy_ids` (UUID[], sell only), `matched_contracts` (INTEGER, tracks sold qty on buys), `realized_pnl_cents` (REAL, P&L from sells) |
+| `trades` | Logged trades (buy + sell) | `event_id`, `word_id`, `side`, `action` (buy/sell, default buy), `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL), `result` (win/loss/sold), `pnl_cents` (INTEGER), `exit_price` (REAL, sell only), `matched_buy_ids` (UUID[], sell only), `matched_contracts` (INTEGER, tracks sold qty on buys), `realized_pnl_cents` (REAL, P&L from sells), `strategy` (TEXT, default 'v1' — v1=AI-guided legacy, v2=transcript-driven current) |
 | `event_results` | Settlement outcomes per word | `event_id`, `word_id`, `was_mentioned` |
 | `speakers` | Registered speakers for corpus | `name` |
 | `transcript_segments` | Atomic text chunks tagged speaker/non-speaker | `transcript_id`, `section_id`, `order_index`, `text`, `is_speaker_content`, `attribution` |
@@ -402,9 +405,11 @@ Each step requires explicit approval before advancing. Progress timers show elap
 
 **Step 1: Clean Transcript**
 - AI (Claude Haiku 4.5) splits raw text into segments, tagging each as speaker content or non-speaker (reporter questions, moderator remarks, stage directions).
+- **Short segments rule:** The AI prompt enforces 100-200 word segments for speaker content, breaking at natural topic transitions. This ensures the downstream sectioning step can assign accurate categories — a 500+ word monologue covering 5 topics would otherwise get a single vague category like "General". The prompt explicitly states: "A 500+ word segment almost certainly contains multiple topics and must be split further."
 - User sees segments with green "S" (speaker) / orange "X" (non-speaker) toggle buttons.
 - Non-speaker content is KEPT for context but excluded from word detection.
 - Quotes/readings by the speaker count as speaker content (maps to Kalshi resolution rules — the word was physically said by the speaker).
+- **Segment splitting:** Users can **highlight text** within any segment to split it. A floating button appears above the selection ("Mark as non-speaker" or "Mark as speaker"). Clicking it splits the segment into 2-3 pieces: text before selection (keeps original status), selected text (flipped), text after selection (keeps original status). Uses `POST /api/transcripts/[id]/split-segment` with `{ segmentId, startOffset, endOffset }`. The API deletes the original segment, reindexes `order_index` for all subsequent segments, and inserts the new pieces. Selecting an entire segment is ignored (use the S/X toggle instead). Useful when the AI groups a reporter question inside a speaker monologue.
 - "Save Changes" persists toggles without advancing. "Approve Cleaning" locks in the cleaning and advances to sectioning.
 - "Re-clean" reruns the AI from scratch (costs another Haiku call).
 - Metadata-only transcripts (<200 chars) show a warning and block the clean button.
@@ -414,6 +419,8 @@ Each step requires explicit approval before advancing. Progress timers show elap
 - **section_type** describes FORMAT (was it a Q&A exchange?). **category** describes CONTENT (was it about foreign policy?). These are independent — a Q&A about Iran has `section_type: "qa"` and `category: "Foreign Policy"`.
 - Per-speaker category system with pending/approved flow (see Speaker Categories below).
 - User can: reassign categories (custom dropdown), rename categories (✎ button, propagates everywhere), remove categories (× button), change section types (native select).
+- **Custom category creation:** The category dropdown on each section card includes a "+ Create new..." option at the bottom (separated by a divider). Clicking it reveals an inline text input. Type a name and press Enter to create the category as `pending` in `speaker_categories`, assign it to the section, and add it to the pending approval banner. If the name matches an existing category, it just assigns without creating a duplicate. Uses `POST /api/corpus/speakers/categories` with `{ speakerId, name, status: "pending" }`.
+- **Full category library in dropdown:** The dropdown shows all categories from three sources: (1) categories used in the current transcript's sections, (2) all approved speaker categories from the DB, (3) pending categories. Previously it only showed categories from (1), so on a new transcript the dropdown was nearly empty.
 - New categories must all be approved/rejected before sections can be approved.
 - "Re-section" clears pending categories and reruns AI.
 
@@ -454,7 +461,7 @@ Full-width read-only view for transcripts with `completed = true`. Replaces the 
 - Sections in chronological speech order (default) or grouped by category (toggle: "Speech Order" / "By Category").
 - Each section card: title, category badge (colored), section_type badge (subtle grey), description, strike tags with counts. Left border color-coded by category.
 - Expand any section to read the actual transcript text (speaker content normal, non-speaker greyed/italic with attribution).
-- Header shows: title, date, word count, section count, "X YESs & Y NOs".
+- Header shows: title, date, word count, estimated duration (`~X min`), section count, "X YESs & Y NOs".
 
 **Word Analysis Tab:**
 - Table of all strike words from the linked Kalshi event (not all speaker corpus words).
@@ -473,9 +480,10 @@ Full-width read-only view for transcripts with `completed = true`. Replaces the 
 
 ### Home Page (`/`)
 
+- **Bulk Import All Series** button — inline with the "Mention Market Research" title (top-right). Calls `POST /api/corpus/bulk-import` which loops all series across all speakers, importing latest settled events from Kalshi. Shows "Importing..." during execution and displays result summary (events, words, results imported across N series). Takes ~10-15 minutes for a full import of ~30 series. Replaces the need to manually import each series from the Corpus page.
 - Paste a Kalshi mention market URL or event ticker (e.g. `KXTRUMPMENTION-27FEB26`)
 - Loads event details and word contracts from Kalshi API
-- Select speaker (for corpus data), corpus categories, and model preset
+- Select speaker (for corpus data), corpus categories, and model preset — **persisted to localStorage** across page refreshes
 - Shows previously researched events with links
 - "Start Baseline Research" button navigates to research page
 
@@ -553,6 +561,7 @@ CompareTab (orchestrator — manages set list, data fetching, view state)
 
 Four tabs: **Mention History**, **Kalshi Markets**, **Transcripts**, **Quick Analysis**
 
+- Speaker selection and active tab **persisted to localStorage** across page refreshes
 - Manage speakers and their associated Kalshi series
 - Import historical events from Kalshi series
 - View mention rates across past events (with search bar for filtering words)
@@ -564,6 +573,7 @@ Four tabs: **Mention History**, **Kalshi Markets**, **Transcripts**, **Quick Ana
 
 ### Analytics Page (`/analytics`)
 
+- **Strategy toggle** — V2 (Current) / V1 (Legacy) pill toggle in the header, next to the title. Defaults to V2. Switching re-fetches all data filtered by strategy. V1 shows the legacy AI-guided trades, V2 shows transcript-driven trades logged going forward.
 - **Summary cards (8 boxes):** Total Trades, Total Cost, Wins, Losses, Win Rate, Total P&L, EV, ROI
 - **Overview/Calendar toggle** (same style as P&L page):
   - **Overview** — Cumulative P&L line chart (Recharts, purple line) built from logged trade data grouped by event date
@@ -578,6 +588,9 @@ Four tabs: **Mention History**, **Kalshi Markets**, **Transcripts**, **Quick Ana
 ### Trade Analytics Page (`/trade-analytics`)
 
 Per-word trade performance analysis, designed to evaluate edge at the word level across speakers. Unlike the Analytics page (which groups by event), Trade Analytics groups by **word** — so you can see your track record for "China" across all events regardless of which speech it was from.
+
+**Strategy Toggle:**
+- V2 (Current) / V1 (Legacy) pill toggle in the header, next to the title. Same behavior as Analytics page — defaults to V2, re-fetches on change.
 
 **Speaker Filter:**
 - Dropdown selector at the top to filter by individual speakers or "All Speakers" (aggregates across all speakers)
@@ -1125,6 +1138,7 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 - `entryPrice` — Decimal 0-1 (e.g. `0.116` for 11.6¢). For sells, this is the exit/sell price.
 - `contracts` — Integer count
 - `totalCostCents` — Total cost in cents as a float (e.g. `116.0` for $1.16). Stored as REAL in Postgres, no rounding.
+- `strategy` — Automatically set to `"v2"` on all new trades (both buy and sell). Not a user-facing field. Legacy trades from the old AI-guided approach have `strategy: "v1"`.
 
 **Sell trade FIFO matching (in `trades/log/route.ts`):**
 1. Fetches open buy trades for the same `event_id`, `word_id`, `side` with `action='buy'`, `result IS NULL`, ordered by `created_at ASC`
@@ -1146,10 +1160,11 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | `/api/corpus/series/events` | GET/DELETE | Get events in a series, or exclude a single event. DELETE unlinks events with research/trades (sets `series_id=null`) instead of deleting them, adds ticker to `excluded_tickers` |
 | `/api/corpus/categories` | GET | Get corpus categories for a speaker |
 | `/api/corpus/import-historical` | POST | Bulk import settled historical events from Kalshi for a series. Skips events that already belong to a different series (won't overwrite another speaker's ownership). Respects `excluded_tickers` array. Only imports events with `status: "settled"` |
+| `/api/corpus/bulk-import` | POST | Bulk import ALL series for ALL speakers. Loops through every `series` row, fetches settled events from Kalshi, upserts events/words/results, updates series stats. Takes ~10-15 min. Returns `{ message, totalEvents, totalWords, totalResults, totalSeries, errors }`. `maxDuration: 300` (5 min server timeout). Called from the "Bulk Import All Series" button on the home page. |
 | `/api/corpus/mention-history` | GET | Get word mention history |
 | `/api/corpus/kalshi-series` | GET | Search Kalshi for series |
 | `/api/corpus/quick-prices` | GET | Quick market price lookup. Returns `yesBid`, `yesAsk`, `noAsk`, `lastPrice`, `volume` per market |
-| `/api/corpus/speakers/categories` | GET | List speaker categories. Supports `?speakerId=X&status=pending` filter |
+| `/api/corpus/speakers/categories` | GET/POST | GET: List speaker categories. Supports `?speakerId=X&status=pending` filter. POST: Create a new speaker category `{ speakerId, name, status? }`. Defaults to `status: "pending"`. Uses upsert on `(speaker_id, name)` to avoid duplicates. Auto-assigns next `order_index`. |
 | `/api/corpus/speakers/categories/rename` | POST | Rename a category everywhere — updates `speaker_categories` row + all `transcript_sections` across speaker's transcripts |
 | `/api/corpus/series/events` | GET | Now supports `?speakerId=X&all=1` to return ALL events across all series for a speaker (for transcript upload dropdown) |
 
@@ -1170,14 +1185,15 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | `/api/transcripts/[id]/sections` | GET/POST/PATCH | List sections; trigger AI sectioning with categories; approve/adjust sections and categories |
 | `/api/transcripts/[id]/detect-words` | POST | Run word detection across approved sections. Accepts optional `eventId` or `words` array. |
 | `/api/transcripts/[id]/word-detections` | GET | Load saved word detection results (section-level + totals) |
+| `/api/transcripts/[id]/split-segment` | POST | Split a segment into 2-3 pieces at a text selection. Body: `{ segmentId, startOffset, endOffset }` (character offsets into the segment's text). Deletes the original segment, shifts `order_index` of all subsequent segments, inserts new segments with flipped `is_speaker_content` on the selected portion. Returns the full updated segments array for the transcript. |
 
 ### Other
 
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/settlement/check` | POST | Check market settlement. Body: `{ eventId? }`. When `eventId` is provided, checks that specific event regardless of status (allows re-checking completed events). When omitted, only checks unsettled events (`status != 'completed'`). Auto-settles if all markets have results. **Also refreshes `event_date`** from Kalshi's current `sub_title` — fixes recurring events (e.g. press briefings) where the initial date was stale. |
-| `/api/analytics/performance` | GET | Aggregate performance analytics |
-| `/api/analytics/trade-analytics` | GET | Per-word trade analytics grouped by speaker. Returns resolved trades aggregated by word with edge calculations, individual entries, and expandable trade details. Supports "All" aggregation across speakers |
+| `/api/analytics/performance` | GET | Aggregate performance analytics. Accepts `?strategy=v2` (default) or `?strategy=v1` to filter trades by strategy version. |
+| `/api/analytics/trade-analytics` | GET | Per-word trade analytics grouped by speaker. Accepts `?strategy=v2` (default) or `?strategy=v1`. Returns resolved trades aggregated by word with edge calculations, individual entries, and expandable trade details. Supports "All" aggregation across speakers |
 | `/api/ws/prices` | GET | WebSocket proxy for live Kalshi prices |
 
 ---
@@ -1389,7 +1405,7 @@ npm start
 
 ## Migrations
 
-All migrations are in `supabase/migrations/` and have been applied to the live database.
+All 18 migrations (001-018) are in `supabase/migrations/` and have been applied to the live database.
 
 | # | File | Description |
 |---|------|-------------|
@@ -1410,6 +1426,7 @@ All migrations are in `supabase/migrations/` and have been applied to the live d
 | 015 | `015_speaker_categories.sql` | `speaker_categories` table with `speaker_id`, `name`, `color`, `order_index`. Adds `category_id`/`category_name` on `transcript_sections`. Adds `needs_review`/`review_reason` on `transcripts`. RLS policies. |
 | 016 | `016_category_status.sql` | Adds `status TEXT NOT NULL DEFAULT 'approved'` (CHECK: pending/approved) to `speaker_categories` for the category approval flow |
 | 017 | `017_event_transcript_sets.sql` | `event_transcript_sets` table: `id UUID PK`, `event_id UUID FK → events (CASCADE)`, `name TEXT`, `transcript_ids UUID[]`, `created_at`, `updated_at`. `UNIQUE(event_id, name)`. RLS enabled with allow-all policy. Stores named transcript groups for the Transcript tab on the research page. |
+| 018 | `018_trade_strategy.sql` | `trades.strategy TEXT NOT NULL DEFAULT 'v1'` — tags trades by trading strategy. All existing trades default to `v1` (AI-guided legacy). New trades logged via the UI get `strategy='v2'` (transcript-driven current). Index `idx_trades_strategy`. Analytics and Trade Analytics pages default to showing v2 trades only, with a toggle to view v1 legacy data. |
 
 To apply new migrations, use the Supabase Management API (never ask the user to do it manually):
 
@@ -1727,6 +1744,7 @@ interface Trade {
   matched_buy_ids: string[] | null; // buy IDs this sell matched (sell trades only)
   matched_contracts: number;        // how many contracts sold (on buys: sold qty; on sells: always = contracts)
   realized_pnl_cents: number | null; // P&L from sells (accumulated on buys, snapshot on sells)
+  strategy: "v1" | "v2";           // v1=AI-guided legacy, v2=transcript-driven current
   agent_estimated_probability: number | null;
   agent_edge: number | null;
   created_at: string;
@@ -1888,7 +1906,72 @@ For speakers without curated PDF transcripts (e.g. Kathy Hochul), transcripts ca
 
 ### Bulk Series Import
 
-All speakers' series were bulk-imported from Kalshi during this session. This pulls all settled events with their word results. To keep event lists current, periodically run an import across all series (the `/api/corpus/import-historical` endpoint handles individual series).
+All speakers' series were bulk-imported from Kalshi. This pulls all settled events with their word results. To keep event lists current, use the "Bulk Import All Series" button on the home page — it calls `POST /api/corpus/bulk-import` which loops all series across all speakers. Takes ~10-15 minutes for ~30 series. The button shows "Importing..." and displays results when done.
+
+### Trade Strategy Versioning
+
+Trades are tagged with a `strategy` column (`v1` or `v2`):
+
+- **v1 (Legacy)** — All trades logged before the strategic pivot. These used AI-generated trade recommendations and briefings. ~78 trades, -$44 P&L, 49% win rate.
+- **v2 (Current)** — Trades logged under the new transcript-driven approach. All new trades via `/api/trades/log` automatically get `strategy: 'v2'`.
+
+**Analytics filtering:**
+- Both `/api/analytics/performance` and `/api/analytics/trade-analytics` accept `?strategy=v2` (default) or `?strategy=v1`
+- The Analytics and Trade Analytics pages show a V2/V1 toggle pill in the header
+- V2 is selected by default — the dashboard starts with a clean slate
+- Switching to V1 loads the legacy trade data for reference
+
+**Important:** The P&L page (`/pnl`) is NOT affected by strategy versioning — it pulls directly from Kalshi API fills, not the `trades` table.
+
+### localStorage Persistence
+
+Several UI selections are persisted to `localStorage` so they survive page refreshes:
+
+| Key | Page | What it persists |
+|-----|------|-----------------|
+| `kalshi-corpus-speaker` | Corpus (`/corpus`) | Selected speaker ID |
+| `kalshi-corpus-tab` | Corpus (`/corpus`) | Active tab (mentions/markets/transcripts/quick) |
+| `kalshi-home-speaker` | Home (`/`) | Selected speaker ID |
+| `kalshi-model-preset` | Home (`/`) | Model preset (opus/hybrid/sonnet/haiku) |
+| `kalshi-ta-speaker` | Trade Analytics (`/trade-analytics`) | Selected speaker filter |
+
+The Research page (`/research/[id]`) restores speaker from the event's `speaker_id` in the database, so it doesn't need localStorage.
+
+**Pattern:** Each uses `useState(() => { if (typeof window !== "undefined") return localStorage.getItem(key) ?? default; return default; })` for initialization, and a `useEffect` to write on change.
+
+### Segment Splitting (Cleaning Step)
+
+During the cleaning step, users can split a segment to reclassify part of it as speaker/non-speaker. This addresses cases where the AI cleaning groups a reporter's question within a speaker's monologue as a single segment.
+
+**UI flow:**
+1. User highlights text within a segment's `<span data-segment-id=...>` element
+2. `onMouseUp` handler detects the selection, finds the parent segment via `data-segment-id` attribute
+3. Calculates `startOffset` and `endOffset` relative to the segment's text using `Range` APIs
+4. A floating button appears above the selection (positioned via `getBoundingClientRect`)
+5. Button label: "Mark as non-speaker" (if segment is speaker) or "Mark as speaker" (if non-speaker)
+6. On click, calls `POST /api/transcripts/[id]/split-segment` with `{ segmentId, startOffset, endOffset }`
+
+**API behavior:**
+- Slices the original text into `before`, `selected`, `after` (trimmed, empty parts skipped)
+- The `selected` portion gets `is_speaker_content` flipped; `before` and `after` keep the original status
+- Shifts `order_index` of all subsequent segments to make room
+- Deletes original segment, inserts 2-3 new ones
+- Returns the full updated segments array
+
+**Edge cases:**
+- Selecting the entire segment text is ignored (use the S/X toggle button instead)
+- Selection must start and end within the same segment (cross-segment selection is ignored)
+- Empty/whitespace-only selections are ignored
+
+### Estimated Duration on Transcripts
+
+Transcript duration is estimated from speaker word count using `Math.round(word_count / 145)` minutes (145 wpm = midpoint for formal speech like press briefings and addresses).
+
+Shown in two places:
+- **Transcript list** (TranscriptsTab) — `~X min` badge next to the "completed" badge
+- **TranscriptResultsView header** — `~X min` in the metadata line alongside word count and section count
+
+Only displayed when `word_count > 0` and transcript is completed.
 
 ### Dead Code Policy
 
@@ -1949,8 +2032,13 @@ Check: do the raw fills have `count` (old) or `count_fp` (new)? Do they have `ye
 **Transcript Management System (Corpus page → Transcripts tab):**
 - Three upload modes: PDF (factbase/Roll Call), text paste, YouTube transcript extraction
 - 3-step workflow: AI Clean (speaker/non-speaker tagging) → AI Section (topic sections with content categories) → Detect Words (regex strike detection per section)
+- **Cleaning AI produces short segments** (100-200 words) by breaking at topic transitions — ensures downstream sectioning assigns accurate categories
+- **Segment splitting in cleaning step** — highlight text within a segment → floating button → splits into 2-3 pieces with selected portion's speaker status flipped. API: `POST /api/transcripts/[id]/split-segment`
 - Per-speaker category system with pending/approved flow, rename propagation, retro-classification flagging
+- **Custom category creation in sectioning step** — "+ Create new..." at bottom of each section's category dropdown. Creates as pending, appears in approval banner. Uses `POST /api/corpus/speakers/categories`
+- **Full category library in dropdown** — shows all approved + pending speaker categories, not just ones used in current transcript's sections
 - Category detection fix: scans all AI section categories (not just AI's `new_categories` array) to ensure all categories are surfaced for approval
+- **Estimated duration** on transcript list (`~X min` badge) and TranscriptResultsView header, calculated from `word_count / 145`
 - Completed transcript results view with three tabs:
   - Structure: category bar + distribution bar + strikes bar + chronological/category-grouped sections with hover/pin filtering
   - Word Analysis: table with Mentioned, Count, Sections (spread), Dom. Category, R/Q breakdown, Kalshi Rate, Sample
@@ -1974,12 +2062,25 @@ Check: do the raw fills have `count` (old) or `count_fp` (new)? Do they have `ye
 - Pipeline now runs 5 agents in Phase 1 (was 6), then clustering, then synthesis
 - AgentName type: `market_analysis` removed
 
+**Bulk Import & Corpus Maintenance:**
+- "Bulk Import All Series" button on home page — one-click import of all series across all speakers via `POST /api/corpus/bulk-import`
+- Bulk import loops all `series` rows, fetches settled events from Kalshi API, upserts events/words/results, updates series stats. ~10-15 min for ~30 series.
+
+**Trade Strategy Versioning (Migration 018):**
+- `trades.strategy` column: `v1` (AI-guided legacy) vs `v2` (transcript-driven current)
+- All existing trades tagged `v1`, new trades auto-tagged `v2`
+- Analytics and Trade Analytics pages default to V2 with toggle to view V1
+- P&L page unaffected (pulls from Kalshi API, not trades table)
+
+**UI Persistence (localStorage):**
+- Speaker selection, model preset, and active tabs persist across page refreshes on Home, Corpus, and Trade Analytics pages
+
 **Previous changes (still in effect):**
 - Briefing tab removed from research page
 - Trade recommendations removed from synthesizer prompt (~140 lines stripped)
 - All 138 AI-cached summary transcripts deleted
 - Bulk corpus import for all 14 speakers across 30 series
-- Migrations 001-017 all applied
+- Migrations 001-018 all applied
 
 ### Next Steps
 

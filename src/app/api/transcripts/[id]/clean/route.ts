@@ -18,9 +18,10 @@ CRITICAL RULES:
 1. If the target speaker QUOTES someone else or READS a statement from someone else, that counts as SPEAKER CONTENT — because the speaker physically said those words.
 2. Keep the text EXACTLY as-is. Do not edit, correct, paraphrase, or summarize any text.
 3. Split the transcript into segments. Each segment should be a coherent chunk of text from a single source (speaker, interviewer, stage direction, etc.).
-4. Do not merge separate speakers' text into one segment.
-5. Timestamps, [applause], [laughter], stage directions, and similar annotations are NOT speaker content — mark them with attribution "Stage Direction".
-6. Interviewer/moderator questions are NOT speaker content — mark them with the appropriate attribution (e.g. "Interviewer", "Moderator", "Reporter", the person's name if known).
+4. IMPORTANT — Keep speaker segments SHORT. Split the speaker's text into paragraph-sized chunks of roughly 100-200 words each. Break at natural topic transitions — when the speaker shifts from one subject to another (e.g. from housing to environment, from personal anecdote to policy), start a new segment. Do NOT put an entire monologue or speech into a single segment. A 500+ word segment almost certainly contains multiple topics and must be split further.
+5. Do not merge separate speakers' text into one segment.
+6. Timestamps, [applause], [laughter], stage directions, and similar annotations are NOT speaker content — mark them with attribution "Stage Direction".
+7. Interviewer/moderator questions are NOT speaker content — mark them with the appropriate attribution (e.g. "Interviewer", "Moderator", "Reporter", the person's name if known).
 
 Return JSON with this structure:
 {

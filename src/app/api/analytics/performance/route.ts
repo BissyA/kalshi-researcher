@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const strategy = searchParams.get("strategy") ?? "v2";
+
   const supabase = getServerSupabase();
 
-  // All trades (for per-event counts)
+  // All trades (for per-event counts), filtered by strategy
   const { data: allTrades } = await supabase
     .from("trades")
-    .select("*");
+    .select("*")
+    .eq("strategy", strategy);
 
   // Resolved BUY trades only (sells are informational — their P&L is on the matched buy)
   const resolvedTrades = allTrades?.filter(

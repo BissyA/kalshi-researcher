@@ -45,6 +45,9 @@ export function SectioningStep({
   const [editingCatName, setEditingCatName] = useState<string | null>(null);
   const [editCatValue, setEditCatValue] = useState("");
   const [catDropdownOpen, setCatDropdownOpen] = useState<string | null>(null);
+  const [approvedSpeakerCats, setApprovedSpeakerCats] = useState<string[]>([]);
+  const [creatingCatForSection, setCreatingCatForSection] = useState<string | null>(null);
+  const [newCatName, setNewCatName] = useState("");
 
   // Load pending categories from DB
   const fetchPendingCategories = useCallback(async () => {
@@ -58,7 +61,19 @@ export function SectioningStep({
     }
   }, [speakerId]);
 
-  useEffect(() => { fetchPendingCategories(); }, [fetchPendingCategories]);
+  // Load approved speaker categories (full library)
+  const fetchApprovedCategories = useCallback(async () => {
+    if (!speakerId) return;
+    try {
+      const res = await fetch(`/api/corpus/speakers/categories?speakerId=${speakerId}&status=approved`);
+      const data = await res.json();
+      setApprovedSpeakerCats((data.categories ?? []).map((c: { name: string }) => c.name));
+    } catch {
+      setApprovedSpeakerCats([]);
+    }
+  }, [speakerId]);
+
+  useEffect(() => { fetchPendingCategories(); fetchApprovedCategories(); }, [fetchPendingCategories, fetchApprovedCategories]);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -222,12 +237,73 @@ export function SectioningStep({
     }
   }
 
-  // All unique category names across sections (for the dropdown)
-  const allCategoryNames = [...new Set(
-    sections
+  // All unique category names: from sections + approved speaker categories + pending
+  const allCategoryNames = [...new Set([
+    ...sections
       .map((s) => s.category_name)
-      .filter((c): c is string => c !== null && c !== undefined)
-  )].sort();
+      .filter((c): c is string => c !== null && c !== undefined),
+    ...approvedSpeakerCats,
+    ...pendingCategories,
+  ])].sort();
+
+  // Create a new custom category, assign to section, add to pending
+  async function handleCreateCategory(sectionId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    // Check if it already exists
+    if (allCategoryNames.includes(trimmed)) {
+      // Just assign it to the section
+      const updated = sections.map((s) =>
+        s.id === sectionId ? { ...s, category_name: trimmed, category_id: null } : s
+      );
+      onSectionsChange(updated);
+      fetch(`/api/transcripts/${transcriptId}/sections`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "adjust", sections: [{ id: sectionId, category_name: trimmed, category_id: null }] }),
+      });
+      setCatDropdownOpen(null);
+      setCreatingCatForSection(null);
+      setNewCatName("");
+      return;
+    }
+
+    // Create as pending in speaker_categories
+    try {
+      const res = await fetch(`/api/corpus/speakers/categories`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ speakerId, name: trimmed, status: "pending" }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        alert(data.error || "Failed to create category");
+        return;
+      }
+    } catch {
+      alert("Failed to create category");
+      return;
+    }
+
+    // Add to pending categories list
+    setPendingCategories((prev) => prev.includes(trimmed) ? prev : [...prev, trimmed]);
+
+    // Assign to the section
+    const updated = sections.map((s) =>
+      s.id === sectionId ? { ...s, category_name: trimmed, category_id: null } : s
+    );
+    onSectionsChange(updated);
+    fetch(`/api/transcripts/${transcriptId}/sections`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "adjust", sections: [{ id: sectionId, category_name: trimmed, category_id: null }] }),
+    });
+
+    setCatDropdownOpen(null);
+    setCreatingCatForSection(null);
+    setNewCatName("");
+  }
 
   // Get segments for a section
   function getSectionSegments(sectionId: string) {
@@ -374,7 +450,7 @@ export function SectioningStep({
             return (
               <div
                 key={section.id}
-                className="border border-zinc-800 rounded-lg overflow-hidden"
+                className="border border-zinc-800 rounded-lg relative"
               >
                 {/* Section header */}
                 <div
@@ -467,8 +543,8 @@ export function SectioningStep({
                         {/* Dropdown */}
                         {catDropdownOpen === section.id && (
                           <>
-                            <div className="fixed inset-0 z-10" onClick={(e) => { e.stopPropagation(); setCatDropdownOpen(null); }} />
-                            <div className="absolute z-20 top-6 right-0 bg-zinc-900 border border-zinc-700 rounded-lg shadow-lg py-1 min-w-[160px] max-h-48 overflow-y-auto">
+                            <div className="fixed inset-0 z-30" onClick={(e) => { e.stopPropagation(); setCatDropdownOpen(null); setCreatingCatForSection(null); setNewCatName(""); }} />
+                            <div className="absolute z-40 top-6 right-0 bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[180px] max-h-64 overflow-y-auto">
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -510,6 +586,36 @@ export function SectioningStep({
                                   {cat}
                                 </button>
                               ))}
+                              {/* Create new category */}
+                              <div className="border-t border-zinc-700 mt-1 pt-1">
+                                {creatingCatForSection === section.id ? (
+                                  <div className="px-2 py-1" onClick={(e) => e.stopPropagation()}>
+                                    <input
+                                      type="text"
+                                      value={newCatName}
+                                      onChange={(e) => setNewCatName(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") handleCreateCategory(section.id, newCatName);
+                                        if (e.key === "Escape") { setCreatingCatForSection(null); setNewCatName(""); }
+                                      }}
+                                      placeholder="Category name..."
+                                      className="w-full text-[10px] px-2 py-1 rounded bg-zinc-800 border border-indigo-500 text-white focus:outline-none"
+                                      autoFocus
+                                    />
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setCreatingCatForSection(section.id);
+                                      setNewCatName("");
+                                    }}
+                                    className="w-full px-3 py-1.5 text-left text-[10px] text-indigo-400 hover:bg-zinc-800"
+                                  >
+                                    + Create new...
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           </>
                         )}

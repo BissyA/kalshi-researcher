@@ -42,16 +42,28 @@ export default function HomePage() {
   const [previousEvents, setPreviousEvents] = useState<PreviousEvent[]>([]);
   const [researchLoading, setResearchLoading] = useState(false);
   const [speakers, setSpeakers] = useState<Array<{ id: string; name: string }>>([]);
-  const [selectedSpeakerId, setSelectedSpeakerId] = useState("");
-  const [modelPreset, setModelPreset] = useState("sonnet");
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("kalshi-home-speaker") ?? "";
+    return "";
+  });
+  const [modelPreset, setModelPreset] = useState(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("kalshi-model-preset") ?? "sonnet";
+    return "sonnet";
+  });
   const [categories, setCategories] = useState<string[]>([]);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [catDropdownOpen, setCatDropdownOpen] = useState(false);
+  const [bulkImporting, setBulkImporting] = useState(false);
+  const [bulkImportResult, setBulkImportResult] = useState<string | null>(null);
 
   useEffect(() => {
     fetchPreviousEvents();
     fetchSpeakers();
   }, []);
+
+  // Persist speaker & model preset to localStorage
+  useEffect(() => { localStorage.setItem("kalshi-home-speaker", selectedSpeakerId); }, [selectedSpeakerId]);
+  useEffect(() => { localStorage.setItem("kalshi-model-preset", modelPreset); }, [modelPreset]);
 
   useEffect(() => {
     if (selectedSpeakerId) {
@@ -149,13 +161,40 @@ export default function HomePage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-white mb-2">
-          Mention Market Research
-        </h1>
+        <div className="flex items-center justify-between mb-2">
+          <h1 className="text-2xl font-bold text-white">
+            Mention Market Research
+          </h1>
+          <button
+            onClick={async () => {
+              setBulkImporting(true);
+              setBulkImportResult(null);
+              try {
+                const res = await fetch("/api/corpus/bulk-import", { method: "POST" });
+                const data = await res.json();
+                setBulkImportResult(data.message ?? "Done");
+                fetchPreviousEvents();
+              } catch (err) {
+                setBulkImportResult(`Error: ${(err as Error).message}`);
+              } finally {
+                setBulkImporting(false);
+              }
+            }}
+            disabled={bulkImporting}
+            className="text-xs px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-600 text-zinc-300 border border-zinc-700 rounded-lg transition-colors"
+          >
+            {bulkImporting ? "Importing..." : "Bulk Import All Series"}
+          </button>
+        </div>
         <p className="text-zinc-400">
           Paste a Kalshi mention market URL to start researching word
           probabilities.
         </p>
+        {bulkImportResult && (
+          <p className={`text-xs mt-2 ${bulkImportResult.startsWith("Error") ? "text-red-400" : "text-green-400"}`}>
+            {bulkImportResult}
+          </p>
+        )}
       </div>
 
       {/* URL Input */}

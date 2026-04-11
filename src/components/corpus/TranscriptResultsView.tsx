@@ -407,6 +407,9 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
                 <span>{new Date(transcript.event_date).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" })}</span>
               )}
               <span>{transcript.word_count?.toLocaleString()} words</span>
+              {transcript.word_count && transcript.word_count > 0 && (
+                <span>~{Math.round(transcript.word_count / 145)} min</span>
+              )}
               <span>{sections.length} sections</span>
               <span>{wordsFound} YESs &amp; {eventWords.length > 0 ? eventWords.length - wordsFound : "?"} NOs</span>
               {transcript.source_url && (

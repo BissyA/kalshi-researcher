@@ -88,6 +88,7 @@ export default function AnalyticsPage() {
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [viewTab, setViewTab] = useState<ViewTab>("overview");
+  const [strategy, setStrategy] = useState<"v2" | "v1">("v2");
 
   // Calendar month navigation
   const now = new Date();
@@ -97,7 +98,7 @@ export default function AnalyticsPage() {
   useEffect(() => {
     async function fetchAnalytics() {
       try {
-        const res = await fetch("/api/analytics/performance");
+        const res = await fetch(`/api/analytics/performance?strategy=${strategy}`);
         if (res.ok) {
           const data = await res.json();
           setOverall(data.overall);
@@ -110,7 +111,7 @@ export default function AnalyticsPage() {
       }
     }
     fetchAnalytics();
-  }, []);
+  }, [strategy]);
 
   // Build cumulative P&L data from eventPerformance (sorted by date)
   const cumulativePnl = useMemo(() => {
@@ -172,7 +173,23 @@ export default function AnalyticsPage() {
 
   return (
     <div className="space-y-8">
-      <h1 className="text-2xl font-bold text-white">Performance Analytics</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-white">Performance Analytics</h1>
+        <div className="flex items-center gap-1 bg-zinc-800 rounded-lg p-0.5">
+          <button
+            onClick={() => setStrategy("v2")}
+            className={`text-xs px-3 py-1.5 rounded-md transition-colors ${strategy === "v2" ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-zinc-300"}`}
+          >
+            V2 (Current)
+          </button>
+          <button
+            onClick={() => setStrategy("v1")}
+            className={`text-xs px-3 py-1.5 rounded-md transition-colors ${strategy === "v1" ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-zinc-300"}`}
+          >
+            V1 (Legacy)
+          </button>
+        </div>
+      </div>
 
       {/* Overall Stats */}
       {overall && (

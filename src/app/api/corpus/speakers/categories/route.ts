@@ -30,3 +30,38 @@ export async function GET(request: Request) {
 
   return NextResponse.json({ categories: data ?? [] });
 }
+
+export async function POST(request: Request) {
+  const { speakerId, name, status } = await request.json();
+
+  if (!speakerId || !name) {
+    return NextResponse.json({ error: "speakerId and name are required" }, { status: 400 });
+  }
+
+  const supabase = getServerSupabase();
+
+  // Get next order_index
+  const { data: existing } = await supabase
+    .from("speaker_categories")
+    .select("order_index")
+    .eq("speaker_id", speakerId)
+    .order("order_index", { ascending: false })
+    .limit(1);
+
+  const nextIndex = (existing?.[0]?.order_index ?? -1) + 1;
+
+  const { data, error } = await supabase
+    .from("speaker_categories")
+    .upsert(
+      { speaker_id: speakerId, name: name.trim(), status: status || "pending", order_index: nextIndex },
+      { onConflict: "speaker_id,name" }
+    )
+    .select()
+    .single();
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ category: data });
+}

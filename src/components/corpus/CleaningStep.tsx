@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import type { DbTranscriptSegment } from "@/types/database";
 
 interface CleaningStepProps {
@@ -10,6 +10,14 @@ interface CleaningStepProps {
   segments: DbTranscriptSegment[];
   onSegmentsChange: (segments: DbTranscriptSegment[]) => void;
   onStatusChange: () => Promise<void>;
+}
+
+interface SplitSelection {
+  segmentId: string;
+  startOffset: number;
+  endOffset: number;
+  isSpeaker: boolean;
+  rect: { top: number; left: number };
 }
 
 export function CleaningStep({
@@ -23,9 +31,12 @@ export function CleaningStep({
   const [cleaning, setCleaning] = useState(false);
   const [approving, setApproving] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [splitting, setSplitting] = useState(false);
   const [pendingChanges, setPendingChanges] = useState<Record<string, boolean>>({});
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [splitSelection, setSplitSelection] = useState<SplitSelection | null>(null);
+  const segmentsContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (cleaning) {
@@ -115,6 +126,100 @@ export function CleaningStep({
       setApproving(false);
     }
   }
+
+  // Handle text selection within segments
+  const handleMouseUp = useCallback(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) {
+      setSplitSelection(null);
+      return;
+    }
+
+    const range = sel.getRangeAt(0);
+    // Find the segment span — walk up from the selection anchor
+    const anchorNode = sel.anchorNode;
+    const focusNode = sel.focusNode;
+    if (!anchorNode || !focusNode) { setSplitSelection(null); return; }
+
+    // Both ends must be in the same segment span
+    const anchorSpan = (anchorNode.nodeType === Node.TEXT_NODE ? anchorNode.parentElement : anchorNode as HTMLElement)?.closest("[data-segment-id]");
+    const focusSpan = (focusNode.nodeType === Node.TEXT_NODE ? focusNode.parentElement : focusNode as HTMLElement)?.closest("[data-segment-id]");
+
+    if (!anchorSpan || !focusSpan || anchorSpan !== focusSpan) {
+      setSplitSelection(null);
+      return;
+    }
+
+    const segmentId = anchorSpan.getAttribute("data-segment-id");
+    const isSpeaker = anchorSpan.getAttribute("data-is-speaker") === "true";
+    if (!segmentId) { setSplitSelection(null); return; }
+
+    // Calculate offsets relative to the segment text
+    const fullText = anchorSpan.textContent ?? "";
+    const selectedText = sel.toString();
+    if (!selectedText.trim()) { setSplitSelection(null); return; }
+
+    // Get start offset by finding position in the text node
+    const preRange = document.createRange();
+    preRange.selectNodeContents(anchorSpan);
+    preRange.setEnd(range.startContainer, range.startOffset);
+    const startOffset = preRange.toString().length;
+    const endOffset = startOffset + selectedText.length;
+
+    if (startOffset === 0 && endOffset === fullText.length) {
+      // Selected the entire segment — just use the toggle button instead
+      setSplitSelection(null);
+      return;
+    }
+
+    const rect = range.getBoundingClientRect();
+    setSplitSelection({
+      segmentId,
+      startOffset,
+      endOffset,
+      isSpeaker,
+      rect: { top: rect.top, left: rect.left + rect.width / 2 },
+    });
+  }, []);
+
+  // Split segment via API
+  async function handleSplit() {
+    if (!splitSelection) return;
+    setSplitting(true);
+    try {
+      const res = await fetch(`/api/transcripts/${transcriptId}/split-segment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          segmentId: splitSelection.segmentId,
+          startOffset: splitSelection.startOffset,
+          endOffset: splitSelection.endOffset,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      onSegmentsChange(data.segments);
+      setSplitSelection(null);
+      window.getSelection()?.removeAllRanges();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Split failed");
+    } finally {
+      setSplitting(false);
+    }
+  }
+
+  // Clear selection when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      if (target.closest("[data-split-button]")) return;
+      if (!target.closest("[data-segment-id]")) {
+        setSplitSelection(null);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
   const speakerCount = segments.filter((s) => s.is_speaker_content).length;
@@ -208,9 +313,9 @@ export function CleaningStep({
         </div>
       </div>
 
-      <div className="p-4 space-y-0.5 max-h-[700px] overflow-y-auto">
+      <div className="p-4 space-y-0.5 max-h-[700px] overflow-y-auto relative" ref={segmentsContainerRef}>
         <p className="text-xs text-zinc-500 mb-3">
-          Click the toggle on any segment to change whether it&apos;s counted as speaker content. Non-speaker segments (orange border) won&apos;t count for word detection.
+          Click the toggle on any segment to change whether it&apos;s counted as speaker content. <strong className="text-zinc-400">Highlight text</strong> within a segment to split and reclassify part of it.
         </p>
         {segments.map((seg) => (
           <div
@@ -238,14 +343,37 @@ export function CleaningStep({
                   [{seg.attribution}]
                 </span>
               )}
-              <span className={`text-xs leading-relaxed ${
-                seg.is_speaker_content ? "text-zinc-300" : "text-zinc-500 italic"
-              }`}>
+              <span
+                data-segment-id={seg.id}
+                data-is-speaker={seg.is_speaker_content}
+                onMouseUp={handleMouseUp}
+                className={`text-xs leading-relaxed ${
+                  seg.is_speaker_content ? "text-zinc-300" : "text-zinc-500 italic"
+                }`}
+              >
                 {seg.text}
               </span>
             </div>
           </div>
         ))}
+
+        {/* Floating split button */}
+        {splitSelection && (
+          <button
+            data-split-button
+            onClick={handleSplit}
+            disabled={splitting}
+            style={{
+              position: "fixed",
+              top: splitSelection.rect.top - 36,
+              left: splitSelection.rect.left,
+              transform: "translateX(-50%)",
+            }}
+            className="z-50 px-2.5 py-1 rounded-md shadow-lg text-[10px] font-medium transition-colors bg-orange-600 hover:bg-orange-500 text-white disabled:bg-zinc-700"
+          >
+            {splitting ? "Splitting..." : splitSelection.isSpeaker ? "Mark as non-speaker" : "Mark as speaker"}
+          </button>
+        )}
       </div>
     </div>
   );

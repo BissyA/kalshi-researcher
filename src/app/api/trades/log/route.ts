@@ -40,6 +40,7 @@ export async function POST(request: Request) {
         contracts,
         total_cost_cents: totalCostCents,
         matched_contracts: 0,
+        strategy: "v2",
         agent_estimated_probability: latestScore?.combined_probability ?? null,
         agent_edge: latestScore?.edge ?? null,
       })
@@ -152,6 +153,7 @@ async function handleSell(supabase: any, params: SellParams) {
       total_cost_cents: totalCostCents,
       matched_buy_ids: matchedBuyIds,
       matched_contracts: contractsToSell,
+      strategy: "v2",
       result: "sold",
       pnl_cents: Math.round(totalRealizedPnl),
       realized_pnl_cents: totalRealizedPnl,

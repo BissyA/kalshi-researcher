@@ -18,8 +18,14 @@ interface Speaker {
 export default function CorpusPage() {
   // Speaker state
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
-  const [selectedSpeakerId, setSelectedSpeakerId] = useState("");
-  const [activeTab, setActiveTab] = useState<CorpusTab>("mentions");
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState(() => {
+    if (typeof window !== "undefined") return localStorage.getItem("kalshi-corpus-speaker") ?? "";
+    return "";
+  });
+  const [activeTab, setActiveTab] = useState<CorpusTab>(() => {
+    if (typeof window !== "undefined") return (localStorage.getItem("kalshi-corpus-tab") as CorpusTab) || "mentions";
+    return "mentions";
+  });
 
   // Mention history state
   const [mentionData, setMentionData] = useState<MentionHistoryRow[]>([]);
@@ -54,6 +60,10 @@ export default function CorpusPage() {
   useEffect(() => {
     fetchSpeakers();
   }, [fetchSpeakers]);
+
+  // Persist speaker & tab to localStorage
+  useEffect(() => { localStorage.setItem("kalshi-corpus-speaker", selectedSpeakerId); }, [selectedSpeakerId]);
+  useEffect(() => { localStorage.setItem("kalshi-corpus-tab", activeTab); }, [activeTab]);
 
   // Fetch categories when speaker changes
   const fetchCategories = useCallback(async () => {
