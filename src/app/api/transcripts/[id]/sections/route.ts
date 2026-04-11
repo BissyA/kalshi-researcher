@@ -178,19 +178,39 @@ export async function POST(
     }
 
     // Persist new categories as 'pending' immediately
-    const newCatNames = result.new_categories ?? [];
-    if (transcript.speaker_id && newCatNames.length > 0) {
+    // Don't rely solely on AI's new_categories — scan all category names used
+    // in sections and ensure any not already in speaker_categories get created.
+    const aiNewCats = new Set(result.new_categories ?? []);
+    const sectionCats = new Set(
+      result.sections.map((s) => s.category).filter((c): c is string => !!c)
+    );
+    // Merge: anything the AI used that isn't already an existing category
+    const existingSet = new Set(existingCategories.map((c) => c.toLowerCase()));
+    const allNewCats: string[] = [];
+    for (const cat of sectionCats) {
+      if (!existingSet.has(cat.toLowerCase())) {
+        allNewCats.push(cat);
+      }
+    }
+    // Also include anything in AI's new_categories not already covered
+    for (const cat of aiNewCats) {
+      if (!existingSet.has(cat.toLowerCase()) && !allNewCats.find((c) => c.toLowerCase() === cat.toLowerCase())) {
+        allNewCats.push(cat);
+      }
+    }
+
+    if (transcript.speaker_id && allNewCats.length > 0) {
       // Get current max order_index
-      const { data: existingCats } = await supabase
+      const { data: existingCatsForOrder } = await supabase
         .from("speaker_categories")
         .select("order_index")
         .eq("speaker_id", transcript.speaker_id)
         .order("order_index", { ascending: false })
         .limit(1);
 
-      let nextOrder = (existingCats?.[0]?.order_index ?? -1) + 1;
+      let nextOrder = (existingCatsForOrder?.[0]?.order_index ?? -1) + 1;
 
-      for (const catName of newCatNames) {
+      for (const catName of allNewCats) {
         await supabase
           .from("speaker_categories")
           .upsert(
@@ -277,7 +297,7 @@ export async function POST(
     return NextResponse.json({
       sections: savedSections ?? [],
       segments: updatedSegments ?? [],
-      newCategories: result.new_categories ?? [],
+      newCategories: allNewCats,
       status: "sectioned",
     });
   } catch (err) {

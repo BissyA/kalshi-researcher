@@ -33,7 +33,8 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
   const [uploadUrl, setUploadUrl] = useState("");
   const [uploadEventId, setUploadEventId] = useState("");
   const [uploadText, setUploadText] = useState("");
-  const [uploadMode, setUploadMode] = useState<"pdf" | "text">("pdf");
+  const [uploadMode, setUploadMode] = useState<"pdf" | "text" | "youtube">("pdf");
+  const [uploadYoutubeUrl, setUploadYoutubeUrl] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -170,6 +171,19 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
           method: "POST",
           body: formData,
         });
+      } else if (uploadMode === "youtube" && uploadYoutubeUrl.trim()) {
+        res = await fetch("/api/transcripts/upload-youtube", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            speakerId,
+            youtubeUrl: uploadYoutubeUrl.trim(),
+            eventId: uploadEventId || null,
+            title: uploadTitle.trim() || null,
+            eventDate: uploadDate || null,
+            sourceUrl: uploadUrl || uploadYoutubeUrl.trim(),
+          }),
+        });
       } else if (uploadMode === "text" && uploadText.trim()) {
         res = await fetch("/api/transcripts/upload", {
           method: "POST",
@@ -194,6 +208,7 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
       // Reset form & refresh
       setUploadTitle(""); setUploadDate(""); setUploadUrl("");
       setUploadEventId(""); setUploadText(""); setUploadFile(null);
+      setUploadYoutubeUrl("");
       setShowUpload(false);
       await fetchTranscripts();
       setSelectedId(data.transcript.id);
@@ -362,7 +377,7 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
                     : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
                 }`}
               >
-                PDF Upload
+                PDF
               </button>
               <button
                 onClick={() => setUploadMode("text")}
@@ -372,7 +387,17 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
                     : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
                 }`}
               >
-                Paste Text
+                Text
+              </button>
+              <button
+                onClick={() => setUploadMode("youtube")}
+                className={`flex-1 text-[10px] py-1 rounded transition-colors ${
+                  uploadMode === "youtube"
+                    ? "bg-indigo-600 text-white"
+                    : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                YouTube
               </button>
             </div>
 
@@ -421,6 +446,22 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
               </div>
             )}
 
+            {/* YouTube URL input */}
+            {uploadMode === "youtube" && (
+              <div>
+                <input
+                  type="text"
+                  placeholder="Paste YouTube URL (e.g. youtube.com/watch?v=...)"
+                  value={uploadYoutubeUrl}
+                  onChange={(e) => setUploadYoutubeUrl(e.target.value)}
+                  className="w-full px-2 py-1.5 bg-zinc-900 border border-zinc-700 rounded text-white text-xs focus:outline-none focus:border-zinc-500"
+                />
+                <p className="text-[10px] text-zinc-600 mt-1">
+                  Extracts the auto-generated transcript from the video
+                </p>
+              </div>
+            )}
+
             {/* Text paste area */}
             {uploadMode === "text" && (
               <>
@@ -444,7 +485,8 @@ export function TranscriptsTab({ speakerId, speakerName }: TranscriptsTabProps) 
               disabled={
                 uploading ||
                 (uploadMode === "pdf" && !uploadFile) ||
-                (uploadMode === "text" && !uploadText.trim())
+                (uploadMode === "text" && !uploadText.trim()) ||
+                (uploadMode === "youtube" && !uploadYoutubeUrl.trim())
               }
               className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white text-xs rounded transition-colors"
             >

@@ -38,6 +38,7 @@ import { RunHistory } from "@/components/research/RunHistory";
 import { SourcesTab, extractSources } from "@/components/research/SourcesTab";
 import { ResearchNotes } from "@/components/research/ResearchNotes";
 import { QuickTradeTable } from "@/components/research/QuickTradeTable";
+import { CompareTab } from "@/components/research/CompareTab";
 // Briefing tab removed — AI opinions were hurting trading performance
 
 export default function ResearchDashboard({
@@ -526,6 +527,14 @@ export default function ResearchDashboard({
 
           <AgentOutputAccordion researchSummary={researchSummary} />
         </div>
+      )}
+
+      {/* ── Compare Tab ── */}
+      {activeTab === "compare" && (
+        <CompareTab
+          eventId={eventId}
+          speakerId={selectedSpeakerId}
+        />
       )}
 
       {/* ── Sources Tab ── */}

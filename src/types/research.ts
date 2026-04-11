@@ -295,7 +295,6 @@ export type AgentName =
   | "agenda"
   | "news_cycle"
   | "event_format"
-  | "market_analysis"
   | "recent_recordings"
   | "clustering"
   | "synthesizer";

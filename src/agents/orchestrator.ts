@@ -3,7 +3,6 @@ import { runHistoricalAgent } from "./historical";
 import { runAgendaAgent } from "./agenda";
 import { runNewsCycleAgent } from "./news-cycle";
 import { runEventFormatAgent } from "./event-format";
-import { runMarketAnalysisAgent } from "./market-analysis";
 import { runRecentRecordingsAgent } from "./recent-recordings";
 import { runClusteringAgent } from "./clustering";
 import { runSynthesizer } from "./synthesizer";
@@ -16,7 +15,6 @@ import {
   AgendaResult,
   NewsCycleResult,
   EventFormatResult,
-  MarketAnalysisResult,
   RecentRecordingsResult,
   ModelPreset,
 } from "@/types/research";
@@ -37,7 +35,6 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         agenda: OPUS,
         news_cycle: OPUS,
         event_format: OPUS,
-        market_analysis: OPUS,
         recent_recordings: OPUS,
         clustering: OPUS,
         synthesizer: OPUS,
@@ -48,7 +45,6 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         agenda: SONNET,
         news_cycle: SONNET,
         event_format: HAIKU,
-        market_analysis: SONNET,
         recent_recordings: HAIKU,
         clustering: HAIKU,
         synthesizer: OPUS,
@@ -59,7 +55,6 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         agenda: SONNET,
         news_cycle: SONNET,
         event_format: SONNET,
-        market_analysis: SONNET,
         recent_recordings: SONNET,
         clustering: SONNET,
         synthesizer: SONNET,
@@ -70,7 +65,6 @@ function getAgentModels(preset: ModelPreset = "sonnet"): AgentModelMap {
         agenda: HAIKU,
         news_cycle: HAIKU,
         event_format: HAIKU,
-        market_analysis: HAIKU,
         recent_recordings: HAIKU,
         clustering: HAIKU,
         synthesizer: HAIKU,
@@ -127,26 +121,6 @@ export async function runResearchPipeline(
     await checkCancelled(supabase, runId);
     emit("historical");
 
-    // Load cached transcripts for this speaker
-    let cachedTranscripts: Array<{ title: string; date: string; source: string; url: string; wordCount: number; summary: string }> = [];
-    try {
-      const { data: cached } = await supabase
-        .from("transcripts")
-        .select("title, event_date, source_url, word_count, full_text")
-        .eq("speaker", input.event.speaker);
-
-      cachedTranscripts = (cached ?? []).map((t) => ({
-        title: t.title ?? "",
-        date: t.event_date ?? "",
-        source: "cached",
-        url: t.source_url ?? "",
-        wordCount: t.word_count ?? 0,
-        summary: t.full_text === "(metadata only)" ? "" : (t.full_text ?? ""),
-      }));
-    } catch (cacheErr) {
-      console.error("Failed to load transcript cache:", cacheErr);
-    }
-
     const agentPromises: Array<{
       name: AgentName;
       promise: Promise<{ data: unknown; inputTokens: number; outputTokens: number; estimatedCostCents: number }>;
@@ -158,7 +132,6 @@ export async function runResearchPipeline(
           eventTitle: input.event.title,
           eventType: input.event.eventType,
           words: wordNames,
-          cachedTranscripts: cachedTranscripts.length > 0 ? cachedTranscripts : undefined,
           model: models.historical,
         }),
       },
@@ -181,18 +154,6 @@ export async function runResearchPipeline(
           eventDate: input.event.eventDate,
           venue: input.event.venue,
           model: models.event_format,
-        }),
-      },
-      {
-        name: "market_analysis",
-        promise: runMarketAnalysisAgent({
-          speaker: input.event.speaker,
-          eventTitle: input.event.title,
-          words: input.words.map((w) => ({
-            word: w.word,
-            yesPrice: w.yesPrice,
-          })),
-          model: models.market_analysis,
         }),
       },
     ];
@@ -270,12 +231,6 @@ export async function runResearchPipeline(
         currentContextWeight: 0.5,
       },
     };
-    const marketAnalysisResult = (agentResults.market_analysis as MarketAnalysisResult) ?? {
-      marketImpliedTopics: [],
-      pricingAssessments: {},
-      correlatedPairs: [],
-      overallMarketNotes: "Market analysis failed",
-    };
     const recentRecordingsResult = (agentResults.recent_recordings as RecentRecordingsResult) ?? {
       recordings: [],
       selectionRationale: "Recent recordings search failed",
@@ -289,33 +244,10 @@ export async function runResearchPipeline(
         agenda_result: agendaResult,
         news_cycle_result: newsCycleResult,
         event_format_result: eventFormatResult,
-        market_analysis_result: marketAnalysisResult,
         recent_recordings_result: recentRecordingsResult,
       }).eq("id", runId);
     } catch (dbErr) {
       console.error("Failed to save phase 1 results:", dbErr);
-    }
-
-    // Cache transcript metadata for future runs (non-critical)
-    try {
-      if (historicalResult.transcriptsFound?.length > 0) {
-        for (const t of historicalResult.transcriptsFound) {
-          await supabase.from("transcripts").upsert(
-            {
-              speaker: input.event.speaker,
-              event_type: input.event.eventType,
-              event_date: t.date || null,
-              title: t.title,
-              source_url: t.url || null,
-              full_text: t.summary || "(metadata only)",
-              word_count: t.wordCount || null,
-            },
-            { onConflict: "speaker,title,event_date" }
-          );
-        }
-      }
-    } catch (cacheErr) {
-      console.error("Failed to cache transcripts:", cacheErr);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -366,7 +298,6 @@ export async function runResearchPipeline(
       agendaResult,
       newsCycleResult,
       eventFormatResult,
-      marketAnalysisResult,
       clusterResult: clusteringResult.data,
       corpusMentionRates: input.corpusMentionRates,
       corpusMentionRatesAll: input.corpusMentionRatesAll,
@@ -379,30 +310,6 @@ export async function runResearchPipeline(
     totalInputTokens += synthesisResult.inputTokens;
     totalOutputTokens += synthesisResult.outputTokens;
     totalCostCents += synthesisResult.estimatedCostCents;
-
-    // ── Recover briefing if the model wrote it outside the JSON ──
-    // Sometimes the model writes the full briefing as markdown before the JSON
-    // block, then uses a placeholder like "[Full markdown briefing text above]"
-    // inside the JSON briefing field. Detect and recover.
-    const briefingValue = synthesisResult.data.briefing ?? "";
-    const isPlaceholder = !briefingValue || briefingValue.length < 100 ||
-      briefingValue.toLowerCase().includes("briefing text above") ||
-      briefingValue.toLowerCase().includes("see above") ||
-      briefingValue.toLowerCase().includes("markdown above");
-
-    if (isPlaceholder && synthesisResult.content) {
-      // Extract the markdown briefing from the raw response text (before the JSON block)
-      const jsonStart = synthesisResult.content.indexOf("```json");
-      const rawJsonStart = jsonStart === -1 ? synthesisResult.content.indexOf('{"briefing"') : jsonStart;
-      if (rawJsonStart > 200) {
-        // There's substantial text before the JSON — that's likely the briefing
-        const preBriefing = synthesisResult.content.slice(0, rawJsonStart).trim();
-        if (preBriefing.length > 100) {
-          synthesisResult.data.briefing = preBriefing;
-          console.log(`[orchestrator] Recovered briefing from raw response (${preBriefing.length} chars)`);
-        }
-      }
-    }
 
     // ──────────────────────────────────────────────────────────────
     // Phase 4: Save results
@@ -475,16 +382,10 @@ export async function runResearchPipeline(
     }
 
     // Mark research run as completed
-    const finalBriefing = synthesisResult.data.briefing ?? null;
-    if (!finalBriefing || finalBriefing.length < 100) {
-      console.error(`[orchestrator] WARNING: Briefing is missing or suspiciously short (${finalBriefing?.length ?? 0} chars)`);
-    }
-
     await supabase.from("research_runs").update({
       status: "completed",
       completed_at: new Date().toISOString(),
       synthesis_result: synthesisResult.data,
-      briefing: finalBriefing,
       total_input_tokens: totalInputTokens,
       total_output_tokens: totalOutputTokens,
       total_cost_cents: totalCostCents,
@@ -507,7 +408,7 @@ export async function runResearchPipeline(
     return {
       wordScores: wordScores,
       savedScores,
-      briefingLength: finalBriefing?.length ?? 0,
+      briefingLength: 0,
       clusters: clusteringResult.data.clusters ?? [],
       eventFormat: {
         estimatedDurationMinutes: eventFormatResult.estimatedDurationMinutes,
@@ -518,7 +419,7 @@ export async function runResearchPipeline(
         historical: historicalResult.overallNotes,
         agenda: agendaResult.overallNotes,
         newsCycle: newsCycleResult?.breakingNewsAlert ?? "Not analyzed",
-        marketAnalysis: marketAnalysisResult.overallMarketNotes,
+        marketAnalysis: "",
       },
       tokenUsage: {
         totalInputTokens,

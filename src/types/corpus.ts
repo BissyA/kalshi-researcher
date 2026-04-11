@@ -38,3 +38,14 @@ export interface SpeakerWithSeries {
   name: string;
   series: SeriesWithStats[];
 }
+
+// ── Transcript Sets (Compare Tab) ──
+
+export interface TranscriptSet {
+  id: string;
+  event_id: string;
+  name: string;
+  transcript_ids: string[];
+  created_at: string;
+  updated_at: string;
+}

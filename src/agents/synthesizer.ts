@@ -5,7 +5,6 @@ import {
   AgendaResult,
   NewsCycleResult,
   EventFormatResult,
-  MarketAnalysisResult,
   ClusterResult,
   CorpusMentionRate,
 } from "@/types/research";
@@ -23,7 +22,6 @@ interface SynthesizerInput {
   agendaResult: AgendaResult;
   newsCycleResult: NewsCycleResult | null;
   eventFormatResult: EventFormatResult;
-  marketAnalysisResult: MarketAnalysisResult;
   clusterResult: ClusterResult;
   corpusMentionRates?: Record<string, CorpusMentionRate>;
   corpusMentionRatesAll?: Record<string, CorpusMentionRate>;
@@ -127,25 +125,11 @@ Return structured JSON in this exact format:
       "keyEvidence": ["string"],
       "clusterName": "string or null"
     }
-  ],
-  "topRecommendations": {
-    "strongYes": [
-      { "word": "string", "edge": number, "reasoning": "string" }
-    ],
-    "strongNo": [
-      { "word": "string", "edge": number, "reasoning": "string" }
-    ]
-  },
-  "researchQuality": {
-    "transcriptsAnalyzed": number,
-    "sourcesConsulted": number,
-    "overallConfidence": "high|medium|low",
-    "caveats": ["string"]
-  }
+  ]
 }
 \`\`\`
 
-You MUST include an entry in wordScores for EVERY word in the list. Sort strongYes and strongNo by absolute edge descending.`;
+You MUST include an entry in wordScores for EVERY word in the list.`;
 
   // Build corpus section(s) with per-event detail
   function formatCorpusDataset(dataset: Record<string, CorpusMentionRate>, label: string): string {
@@ -204,9 +188,6 @@ ${hasNewsCycle ? JSON.stringify(input.newsCycleResult, null, 2) : "NOT AVAILABLE
 === EVENT FORMAT ANALYSIS ===
 ${JSON.stringify(input.eventFormatResult, null, 2)}
 
-=== MARKET PRICE ANALYSIS ===
-${JSON.stringify(input.marketAnalysisResult, null, 2)}
-
 === WORD CLUSTERS ===
 ${JSON.stringify(input.clusterResult, null, 2)}
 ${corpusSection}`;
@@ -215,7 +196,7 @@ ${corpusSection}`;
 
 ${researchData}
 
-Produce a score for EVERY word. Be precise, well-calibrated, and provide actionable trading recommendations.`;
+Produce a score for EVERY word. Be precise and well-calibrated.`;
 
   return callAgentForJson<SynthesisResult>({
     systemPrompt,
