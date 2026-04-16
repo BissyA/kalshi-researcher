@@ -41,6 +41,7 @@ AI-powered research platform for Kalshi **mention markets** — prediction marke
 | Deployment | Local-only (macOS Launch Agent, `localhost:3000`) |
 | PDF Parsing | pdf-parse 2.4.5 (PDFParse class, explicit worker config for Next.js) |
 | YouTube Transcripts | youtube-transcript ^1.3.0 (auto-generated caption extraction) |
+| X (Twitter) Transcripts | yt-dlp (audio download) + whisper-ctranslate2 (faster-whisper CLI wrapper, local `large-v3` model, ~3GB) — completely free/local, no API costs |
 | Markdown | react-markdown ^10.1.0 + remark-gfm ^4.0.1 |
 
 ---
@@ -54,7 +55,7 @@ kalshi-research/
 │   │   ├── page.tsx                  # Home — URL input, event loader, research launcher
 │   │   ├── layout.tsx                # Root layout with nav (Corpus, Analytics, Trade Analytics, P&L)
 │   │   ├── research/
-│   │   │   └── [eventId]/page.tsx    # Research output page (tabs: Research, Sources, Trade Log)
+│   │   │   └── [eventId]/page.tsx    # Research output page (tabs: Research, Transcript, Sources, Trade Log). Tab state URL-backed via ?tab= param
 │   │   ├── corpus/
 │   │   │   └── page.tsx              # Corpus management (speakers, series, transcripts)
 │   │   ├── analytics/
@@ -104,16 +105,21 @@ kalshi-research/
 │   │       │   ├── upload/route.ts   # POST — upload transcript (text)
 │   │       │   ├── upload-pdf/route.ts # POST — upload PDF transcript (pdf-parse v2)
 │   │       │   ├── upload-youtube/route.ts # POST — extract & upload YouTube transcript
-│   │       │   ├── compare/route.ts  # GET — batch fetch transcript data for composite view
+│   │       │   ├── upload-x/route.ts # POST — start async X broadcast transcription (spawns detached worker)
+│   │       │   ├── x-preflight/route.ts # GET — verify yt-dlp + whisper-ctranslate2 installed
+│   │       │   ├── compare/route.ts  # GET — batch fetch transcript data for composite view (requires eventId, strict event-scoped)
 │   │       │   ├── frequencies/route.ts # GET — word frequencies
 │   │       │   ├── [id]/route.ts     # GET/DELETE/PATCH — single transcript
 │   │       │   ├── [id]/download/route.ts # GET — download transcript
-│   │       │   ├── [id]/clean/route.ts # POST — trigger AI cleaning
+│   │       │   ├── [id]/clean/route.ts # POST — trigger AI cleaning (maxTokens 48000 for long transcripts)
 │   │       │   ├── [id]/cleaning/route.ts # GET/PATCH — review/approve cleaning
-│   │       │   ├── [id]/sections/route.ts # GET/POST/PATCH — AI sectioning with categories
-│   │       │   ├── [id]/detect-words/route.ts # POST — word detection per section
-│   │       │   ├── [id]/word-detections/route.ts # GET — load saved detections
-│   │       │   └── [id]/split-segment/route.ts # POST — split a segment at text selection
+│   │       │   ├── [id]/sections/route.ts # GET/POST/PATCH — AI sectioning with categories (approve also sets completed=true)
+│   │       │   ├── [id]/analyses/route.ts # GET/POST — list analyses for a transcript / create new analysis + run detection
+│   │       │   ├── [id]/split-segment/route.ts # POST — split a segment at text selection
+│   │       │   ├── [id]/retry-x/route.ts # POST — retry a failed X transcription
+│   │       ├── transcripts/analyses/
+│   │       │   ├── route.ts              # GET — batch fetch analyses by transcriptIds (for sidebar list)
+│   │       │   └── [analysisId]/route.ts  # GET/DELETE — full detection data for one analysis / delete analysis
 │   │       ├── settlement/
 │   │       │   └── check/route.ts    # POST — check/re-check market settlement
 │   │       └── ws/
@@ -145,7 +151,7 @@ kalshi-research/
 │   │   │   ├── ProgressMessages.tsx  # Research progress indicator
 │   │   │   ├── SourcesTab.tsx        # Sources/transcripts tab
 │   │   │   ├── TabNavigation.tsx     # Tab switcher (Research, Transcript, Sources, Trade Log)
-│   │   │   ├── CompareTab.tsx       # Transcript tab orchestrator — set list, composite view, individual drill-in
+│   │   │   ├── CompareTab.tsx       # Transcript tab orchestrator — set list, composite view, individual drill-in. URL-backed state (?setId, ?view). Strict event scoping + missing-analyses banner
 │   │   │   ├── CompositeTranscriptView.tsx # Aggregated multi-transcript view (Structure + Word Analysis)
 │   │   │   ├── TranscriptSetList.tsx # Named transcript set list with create/delete
 │   │   │   ├── TranscriptSelector.tsx # Multi-select dropdown for picking transcripts into a set
@@ -164,11 +170,10 @@ kalshi-research/
 │   │       ├── MentionSummaryStats.tsx # Summary stats for mention data
 │   │       ├── TranscriptSearchBar.tsx # Search bar for transcripts
 │   │       ├── CorpusTabNav.tsx      # Corpus page tab navigation (4 tabs: mentions, markets, transcripts, quick)
-│   │       ├── TranscriptsTab.tsx    # Main transcript manager (list + upload + workflow)
+│   │       ├── TranscriptsTab.tsx    # Main transcript manager (list + upload + 2-step workflow + analyses manager + event picker)
 │   │       ├── CleaningStep.tsx      # AI cleaning review with speaker/non-speaker toggles
-│   │       ├── SectioningStep.tsx    # AI sectioning with category approval
-│   │       ├── WordDetectionStep.tsx # Word detection with category-grouped view
-│   │       └── TranscriptResultsView.tsx # Full-width completed transcript view (Structure/Word Analysis/Full Transcript)
+│   │       ├── SectioningStep.tsx    # AI sectioning with category approval (approval sets completed=true)
+│   │       └── TranscriptResultsView.tsx # Full-width completed transcript view (Structure/Word Analysis/Full Transcript). Accepts analysisId for scoped detections
 │   ├── hooks/
 │   │   └── useLivePrices.ts          # WebSocket hook for real-time Kalshi prices
 │   ├── lib/
@@ -184,8 +189,11 @@ kalshi-research/
 │       ├── database.ts               # Database row types (DbEvent, DbWord, etc.)
 │       ├── kalshi.ts                 # Kalshi API response types
 │       └── corpus.ts                 # Corpus-related types (MentionHistoryRow, MentionEventDetail)
+├── scripts/
+│   ├── transcribe-x.mjs              # Node worker: yt-dlp → ffmpeg → whisper-ctranslate2 → DB
+│   └── transcribe-x.sh               # Bash wrapper (setsid + nohup + disown) — CRITICAL for true process detachment from Next.js
 ├── supabase/
-│   └── migrations/                   # SQL migrations (001-018, all applied)
+│   └── migrations/                   # SQL migrations (001-021, all applied)
 │       ├── 001_initial_schema.sql    # Core tables: events, words, word_clusters, research_runs,
 │       │                             #   word_scores, transcripts, trades, event_results + views
 │       ├── 002_rls_policies.sql      # Row Level Security policies
@@ -204,7 +212,10 @@ kalshi-research/
 │       ├── 015_speaker_categories.sql    # Speaker categories + category columns on sections + needs_review
 │       ├── 016_category_status.sql       # Status column (pending/approved) on speaker_categories
 │       ├── 017_event_transcript_sets.sql # Named transcript groups for the Transcript tab
-│       └── 018_trade_strategy.sql    # trades.strategy TEXT DEFAULT 'v1' (v1=legacy, v2=current) + index
+│       ├── 018_trade_strategy.sql    # trades.strategy TEXT DEFAULT 'v1' (v1=legacy, v2=current) + index
+│       ├── 019_transcription_status.sql # transcripts.transcription_status/error/progress + source_platform (for X async transcription)
+│       ├── 020_global_categories.sql # Drops speaker_id from speaker_categories, dedupes, makes categories global
+│       └── 021_transcript_analyses.sql # transcript_analyses table + analysis_id FK on detection tables + backfill + scoped uniqueness
 ├── docs/
 │   └── kalshi-openapi.yaml           # Full Kalshi OpenAPI spec
 ├── Dockerfile                        # Multi-stage Node 22 Alpine build (legacy — from previous Fly.io deployment)
@@ -253,15 +264,16 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 | `word_clusters` | Grouped words by theme | `event_id`, `cluster_name`, `theme`, `correlation_note` |
 | `research_runs` | Research pipeline execution records | `event_id`, `layer`, `status`, `model_used`, `briefing`, all agent result JSONB columns, token/cost tracking |
 | `word_scores` | Per-word probability scores from research | `word_id`, `research_run_id`, probabilities (historical/agenda/news/base/combined), `edge`, `confidence`, `reasoning`, `key_evidence` |
-| `transcripts` | Speaker transcripts (real verbatim, uploaded via PDF/text/YouTube) | `speaker`, `speaker_id`, `event_id`, `title`, `event_date`, `full_text`, `raw_text`, `cleaned_text`, `word_count`, `cleaning_status`, `sectioning_status`, `needs_review`, `review_reason`, `completed` |
+| `transcripts` | Speaker transcripts (real verbatim, uploaded via PDF/text/YouTube/X broadcast) | `speaker`, `speaker_id`, `event_id`, `title`, `event_date`, `full_text`, `raw_text`, `cleaned_text`, `word_count`, `cleaning_status`, `sectioning_status`, `needs_review`, `review_reason`, `completed`, `transcription_status` (downloading/transcribing/done/failed, for X async flow), `transcription_error`, `transcription_progress`, `source_platform` (pdf/text/youtube/x) |
 | `trades` | Logged trades (buy + sell) | `event_id`, `word_id`, `side`, `action` (buy/sell, default buy), `entry_price` (REAL), `contracts` (INTEGER), `total_cost_cents` (REAL), `result` (win/loss/sold), `pnl_cents` (INTEGER), `exit_price` (REAL, sell only), `matched_buy_ids` (UUID[], sell only), `matched_contracts` (INTEGER, tracks sold qty on buys), `realized_pnl_cents` (REAL, P&L from sells), `strategy` (TEXT, default 'v1' — v1=AI-guided legacy, v2=transcript-driven current) |
 | `event_results` | Settlement outcomes per word | `event_id`, `word_id`, `was_mentioned` |
 | `speakers` | Registered speakers for corpus | `name` |
 | `transcript_segments` | Atomic text chunks tagged speaker/non-speaker | `transcript_id`, `section_id`, `order_index`, `text`, `is_speaker_content`, `attribution` |
 | `transcript_sections` | Topic sections grouping segments | `transcript_id`, `title`, `description`, `section_type`, `category_id`, `category_name`, `order_index` |
-| `section_word_detections` | Strike word counts per section | `section_id`, `transcript_id`, `word`, `word_id`, `mention_count` |
-| `transcript_word_detections` | Transcript-level word summaries | `transcript_id`, `word`, `word_id`, `total_count`, `section_count` |
-| `speaker_categories` | Per-speaker evolving category list | `speaker_id`, `name`, `color`, `status` (pending/approved), `order_index` |
+| `transcript_analyses` | One row per (transcript, event) analysis — decouples word detection from transcript ownership. A transcript can have many analyses against different events. | `id` (PK), `transcript_id` (FK → transcripts, CASCADE), `event_id` (FK → events, CASCADE), `created_at`. UNIQUE on `(transcript_id, event_id)`. Upsert on re-run. |
+| `section_word_detections` | Strike word counts per section, scoped to an analysis | `section_id`, `transcript_id`, `word`, `word_id`, `mention_count`, `analysis_id` (FK → transcript_analyses, CASCADE, NOT NULL). UNIQUE on `(analysis_id, section_id, word)` |
+| `transcript_word_detections` | Transcript-level word summaries, scoped to an analysis | `transcript_id`, `word`, `word_id`, `total_count`, `section_count`, `analysis_id` (FK → transcript_analyses, CASCADE, NOT NULL). UNIQUE on `(analysis_id, word)` |
+| `speaker_categories` | **Global** category list (shared across ALL speakers as of migration 020 — `speaker_id` column was dropped). Table name retained for backwards compat but is now effectively "categories". | `name` (UNIQUE), `color`, `status` (pending/approved), `order_index` |
 | `event_transcript_sets` | Named groups of transcripts for the Transcript tab on the research page | `event_id` (FK → events, CASCADE delete), `name`, `transcript_ids` (UUID[]). Unique on `(event_id, name)`. Each set is a "composite view" — multiple transcripts merged into one aggregated output |
 | `series` | Kalshi series linked to speakers — one row per (ticker, speaker) pair | `speaker_id`, `series_ticker`, `display_name`, `excluded_tickers`. Unique constraint is `UNIQUE(series_ticker, speaker_id)` — the same Kalshi series (e.g. `KXMENTION`) can be added for multiple speakers independently |
 
@@ -272,7 +284,7 @@ The Kalshi client (`src/lib/kalshi-client.ts`) first checks `KALSHI_PRIVATE_KEY`
 
 ### Migrations
 
-All 17 migrations (001-017) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
+All 21 migrations (001-021) are applied to the live Supabase instance. Run migrations via the Supabase Management API:
 
 ```bash
 curl -s -X POST "https://api.supabase.com/v1/projects/hczppfsuqtpccxvmyaue/database/query" \
@@ -392,19 +404,20 @@ The transcript management system is the primary tool for building structured spe
 
 ### Upload
 
-Three upload modes (toggle buttons: PDF | Text | YouTube):
+Four upload modes (toggle buttons: PDF | Text | YouTube | X):
 
 - **PDF upload** (primary) — drag-and-drop or click to browse. Uses pdf-parse v2 (`PDFParse` class with explicit worker path). Factbase/Roll Call PDFs are auto-cleaned (StressLens labels, page headers/footers, chart artifacts, navigation elements stripped via `cleanFactbaseText()`).
 - **Text paste** (fallback) — for transcripts from other sources.
 - **YouTube transcript** — paste a YouTube URL, the server extracts the auto-generated transcript via the `youtube-transcript` npm package. Supports all URL formats: `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/live/`, `youtube.com/embed/`, or bare 11-character video ID. Strips `[Music]`, `[Applause]`, `[Laughter]` tags. The extracted text enters the same clean → section → detect words pipeline. API: `POST /api/transcripts/upload-youtube` with `{ speakerId, youtubeUrl, title?, eventId?, eventDate?, sourceUrl? }`. Useful for speakers without curated PDF transcripts (e.g. Kathy Hochul) where only YouTube livestreams exist.
-- **Event linking** — optional searchable dropdown (600px wide modal) showing ALL events for the speaker across all series (via `GET /api/corpus/series/events?speakerId=X&all=1`). Selecting an event auto-populates title and date. Event title always overrides filename. Works with all three upload modes.
+- **X (Twitter) broadcast** — paste an X URL (`x.com/i/broadcasts/...`, `x.com/i/spaces/...`, or `x.com/<user>/status/<id>` with video). Server runs yt-dlp to download audio + local Whisper to transcribe. **Asynchronous** — returns immediately with a `transcription_status: "downloading"` row; UI polls every 3s until `done` (or `failed`). Completely free (no API costs). See [X Broadcast Transcription](#x-broadcast-transcription-local-whisper) for full architecture details. API: `POST /api/transcripts/upload-x` with `{ speakerId, xUrl, title?, eventId?, eventDate?, sourceUrl?, useCookies? }`. Only one X transcription can run at a time (lockfile guard). The resulting text enters the same clean → section → detect words pipeline.
+- **Event linking** — optional searchable dropdown (600px wide modal) showing ALL events for the speaker across all series (via `GET /api/corpus/series/events?speakerId=X&all=1`). Selecting an event auto-populates title and date. Event title always overrides filename. Works with all four upload modes.
 
-### Workflow: Clean → Section → Detect Words
+### Workflow: Clean → Section (2-step)
 
-Each step requires explicit approval before advancing. Progress timers show elapsed seconds during AI steps.
+The workflow is now **2 steps** (was 3). Word detection (the old Step 3) has been removed from the setup flow and replaced by the **Transcript Analyses** system (see below). Approving sections automatically marks `completed = true`. Progress timers show elapsed seconds during AI steps. Step pills are clickable — you can navigate back to a prior completed step.
 
 **Step 1: Clean Transcript**
-- AI (Claude Haiku 4.5) splits raw text into segments, tagging each as speaker content or non-speaker (reporter questions, moderator remarks, stage directions).
+- AI (Claude Haiku 4.5, `maxTokens: 48000` — raised from 16000 to handle long transcripts up to ~30K words) splits raw text into segments, tagging each as speaker content or non-speaker (reporter questions, moderator remarks, stage directions).
 - **Short segments rule:** The AI prompt enforces 100-200 word segments for speaker content, breaking at natural topic transitions. This ensures the downstream sectioning step can assign accurate categories — a 500+ word monologue covering 5 topics would otherwise get a single vague category like "General". The prompt explicitly states: "A 500+ word segment almost certainly contains multiple topics and must be split further."
 - User sees segments with green "S" (speaker) / orange "X" (non-speaker) toggle buttons.
 - Non-speaker content is KEPT for context but excluded from word detection.
@@ -423,35 +436,83 @@ Each step requires explicit approval before advancing. Progress timers show elap
 - **Full category library in dropdown:** The dropdown shows all categories from three sources: (1) categories used in the current transcript's sections, (2) all approved speaker categories from the DB, (3) pending categories. Previously it only showed categories from (1), so on a new transcript the dropdown was nearly empty.
 - New categories must all be approved/rejected before sections can be approved.
 - "Re-section" clears pending categories and reruns AI.
+- **Approval sets `completed = true`** — the transcript is now ready for analyses. The sectioning approval endpoint also clears `needs_review` and `review_reason` if they were set. No separate "Save" step.
+- **Discard Transcript** — deletes everything (transcript + segments + sections) after confirmation.
 
-**Step 3: Detect Words**
-- Pure regex matching — no AI, no cost, instant.
-- If transcript is linked to a Kalshi event, pulls word list from that event's `words` table. Otherwise accepts manual word list (one per line).
+### Transcript Analyses (Word Detection — Post-Completion)
+
+**Key concept change:** Word detection is no longer a workflow step. It's a **post-completion action** that can be repeated against different events. A transcript is reusable reference material — it can be analyzed against any number of past or future Kalshi events independently.
+
+**Data model:** `transcript_analyses` table stores one row per `(transcript_id, event_id)` pair. Each analysis has its own independent set of `section_word_detections` and `transcript_word_detections` (scoped by `analysis_id`). Running a new analysis against a different event creates a new row — it does NOT overwrite prior analyses.
+
+**`original` vs `cross` distinction:**
+- **`original`** (green badge) — `transcript.event_id === analysis.event_id`. The transcript IS the speech for this event. Detection results represent ground truth (what actually happened).
+- **`cross`** (indigo badge) — anything else. The transcript is being analyzed against a different event's strike list. Results are predictive pattern-matching, not settlement truth. Reference transcripts (uploaded with no event linked, like a 2024 speech) always show `cross` for all analyses.
+- Analyses are sorted self-first in all lists — `original` analyses appear at the top.
+
+**How to run an analysis (from the Corpus → Transcripts tab):**
+1. Select a completed transcript → right panel shows the **analyses hub**: a list of existing analyses + "Run new analysis" button.
+2. Click **"+ Run new analysis"** (either from the hub or the sidebar `+ Run new analysis` under each transcript) → event picker modal opens.
+3. Event picker shows all events for the speaker (past + future), searchable. Events that already have an analysis show "already analyzed — will re-run". Select an event → `POST /api/transcripts/[id]/analyses` with `{ eventId }`.
+4. Detection runs: pure regex matching (same logic as the old detect-words step — no AI, instant). Results saved to `section_word_detections` + `transcript_word_detections` scoped by the new `analysis_id`.
+5. New analysis auto-selects → full-width TranscriptResultsView opens scoped to that analysis.
+
+**Detection mechanics:**
+- Pulls strike words from the analysis event's `words` table.
 - Scans only `is_speaker_content = true` segments per section.
 - Handles slash-separated variants: "Afford / Affordable / Affordability" matches all three.
-- Results stored in `section_word_detections` (per-section counts) and `transcript_word_detections` (transcript totals).
-- **Save Transcript** — marks `completed = true`, returns to transcript list.
-- **Discard Transcript** — deletes everything (transcript + segments + sections + detections) after confirmation.
+- Upsert on `(transcript_id, event_id)` — re-running against the same event clears and re-creates detections (idempotent).
 
-### Speaker Categories
+**Sidebar transcript search bar:**
+- A live-filter text input sits between the "Transcripts (N)" header and the list.
+- Case-insensitive substring match on transcript title. No Enter needed — filters as you type.
+- When no transcripts match, the list is simply empty.
 
-Categories are per-speaker and evolve organically:
+**Re-opening for edits:**
+- Completed transcripts show "Edit sections" button (or "Review sections" in amber if `needs_review` is set). Clicking re-opens the 2-step workflow by setting `completed = false`. User lands on the Section step. After re-approving, `completed` flips back to `true`.
+- Step pills are clickable for completed steps — navigate between Clean and Section freely.
 
-1. **First transcript** — AI proposes categories based on content (e.g. "Foreign Policy", "Military / Defense", "Economy"). Categories are about CONTENT topics, never structural labels like "Opening" or "Q&A".
-2. **Subsequent transcripts** — AI receives existing approved categories and assigns sections to them. Proposes new categories only if a section genuinely doesn't fit any existing category.
-3. **Pending categories** — written to `speaker_categories` with `status = 'pending'` immediately when AI proposes them. Persist across page refreshes (stored in DB, loaded on mount).
-4. **Approval banner** — amber banner in sectioning step showing each pending category with ✓ (approve) and ✗ (reject) buttons. Double-click to rename before approving.
-5. **Approval** — sets `status = 'approved'`. Category permanently available for this speaker.
-6. **Rejection** — deletes category from `speaker_categories`, clears `category_name` from any sections using it.
-7. **Rename** — double-click in banner or ✎ on section card. Propagates to all sections across all transcripts + `speaker_categories` row via `POST /api/corpus/speakers/categories/rename`.
-8. **Retro-classification** — when new categories are approved, other completed transcripts for the speaker are flagged with `needs_review = true` and a review banner.
-9. **Re-sectioning** clears all pending categories first to avoid duplicates.
+### Categories (Global — applies to ALL speakers)
 
-**Table:** `speaker_categories` — `id`, `speaker_id`, `name`, `color`, `status` (pending/approved), `order_index`, `created_at`. Unique on `(speaker_id, name)`.
+**Migration 020** changed categories from per-speaker to **global**. One canonical row per category name, shared across every speaker. Rename propagates everywhere. Retro-review flags every completed transcript (not just same-speaker).
+
+**Why global:** consistency. Cross-speaker analysis (e.g. filter every transcript tagged "Foreign Policy" across all speakers) is only meaningful if names are shared. Trade-off: you lose speaker-specific nuance — a category like "Monetary Policy" that only really applies to the Fed chair will still appear in dropdowns for every speaker.
+
+**Canonical list as of 2026-04-13 (12 approved categories):**
+Border & Immigration · Budget & Finance · Economy · Foreign Policy · General · Government Relations · Healthcare · Insurance & Fraud · Law & Order · Military / Defense · Opening Remarks · Values
+
+Flow:
+
+1. **First transcript for any speaker** (when no categories exist yet) — AI proposes categories from scratch based on content. Categories are broad topic areas, never structural labels like "Opening" or "Q&A" (those go in `section_type`).
+2. **Every subsequent transcript** — AI receives the full global approved+pending list and is told to "strongly prefer existing" before proposing new categories. New categories only appear when genuinely no existing one fits.
+3. **Pending categories** — written to `speaker_categories` with `status = 'pending'` immediately when AI proposes them. Persist across page refreshes (stored in DB).
+4. **Approval banner** — amber banner in sectioning step shows each pending category with ✓ (approve) and ✗ (reject) buttons. Double-click to rename before approving.
+5. **Approval** — sets `status = 'approved'`. Category permanently available to every speaker.
+6. **Rejection** — deletes the pending row from `speaker_categories`, clears `category_name` from any sections in the current transcript using it.
+7. **Rename** — double-click in banner or ✎ on section card. Propagates to **every** `transcript_sections.category_name` row across all speakers via `POST /api/corpus/speakers/categories/rename` (speakerId no longer part of signature).
+8. **Retro-classification** — when a new category is approved, **every** other completed transcript across all speakers is flagged with `needs_review = true` and a review banner.
+9. **Re-sectioning** clears all pending categories globally first (every pending row, not just this speaker's) to avoid stale duplicates.
+
+**Table:** `speaker_categories` — `id`, `name` (UNIQUE), `color`, `status` (pending/approved), `order_index`, `created_at`. Table name is retained for backwards compatibility but it is effectively the `categories` table — there is no per-speaker scoping. **Do NOT add speaker_id back.**
+
+**Creating a new category manually** — "+ Create new..." option at bottom of each section's category dropdown in the sectioning step. Uses `POST /api/corpus/speakers/categories` with `{ name, status: "pending" }` (speakerId omitted). If the name already exists, returns the existing row with no change (no duplicate).
+
+**API endpoints affected by the global switch (migration 020):**
+- `GET /api/corpus/speakers/categories` — `speakerId` query param accepted but ignored; returns all global categories
+- `POST /api/corpus/speakers/categories` — `{ name, status }`; speakerId ignored
+- `POST /api/corpus/speakers/categories/rename` — `{ oldName, newName }`; speakerId removed from signature
+- `GET /api/transcripts/compare` — speakerId accepted but ignored for category color lookup
 
 ### Completed Transcript View (TranscriptResultsView)
 
-Full-width read-only view for transcripts with `completed = true`. Replaces the workflow panel.
+Full-width read-only view for completed transcripts. Accessed by selecting an analysis from the transcript's analyses list (sidebar or hub). The view is **scoped to the selected analysis** — all strike words, detection counts, and YES/NO badges reflect the specific event the analysis was run against.
+
+**Props:** `analysisId` (scopes detection data), `eventTitle` (displayed in header), `isSelfAnalysis` (drives `original`/`cross` badge).
+
+**Header:**
+- Title, date, word count, duration (~X min), section count, "X YESs & Y NOs"
+- `original` (green badge) or `cross` (indigo badge) + event title — makes it immediately clear whether results are ground truth or reference data
+- "Edit sections" / "Review sections" button (amber if `needs_review`). "Delete" button.
 
 **Structure Tab:**
 - Category bar — colored pills with section count. Hover to preview topics, click to pin/filter.
@@ -461,18 +522,145 @@ Full-width read-only view for transcripts with `completed = true`. Replaces the 
 - Sections in chronological speech order (default) or grouped by category (toggle: "Speech Order" / "By Category").
 - Each section card: title, category badge (colored), section_type badge (subtle grey), description, strike tags with counts. Left border color-coded by category.
 - Expand any section to read the actual transcript text (speaker content normal, non-speaker greyed/italic with attribution).
-- Header shows: title, date, word count, estimated duration (`~X min`), section count, "X YESs & Y NOs".
 
 **Word Analysis Tab:**
-- Table of all strike words from the linked Kalshi event (not all speaker corpus words).
-- Columns: Word, Mentioned (YES/NO badge), Count, Sections (X/Y with %), Dom. Category (colored badge), R/Q (remarks vs qa breakdown e.g. "6r / 3q"), Kalshi Rate (from corpus mention history, color-coded), Sample (e.g. "22/41").
+- **Category filter chips** — row of clickable chips above the search bar showing each category present in the table (color-matched to category badges). Multi-select OR filter: click multiple to see words in any of those categories. "Clear ×" button when any are active. Right-side counter shows `N of M words`. Includes "No category" chip if any rows lack a dominant category.
+- Table of all strike words from the analysis event. Words detected in the transcript show green YES badge; words from the event not detected show red NO badge.
+- Columns: Word (with ▼/▲ expand toggle), Mentioned (YES/NO badge), Count, Sections (X/Y with %), Dom. Category (colored badge), R/Q (remarks vs qa breakdown e.g. "6r / 3q"), Kalshi Rate (from corpus mention history, color-coded), Sample (e.g. "22/41").
 - Sortable by Word, Count, Sections, Kalshi Rate. Searchable.
-- Words from event not found in transcript shown with red NO badge — helps identify what was expected but absent.
+- **Expandable event-by-event rows** — click any word row with a ▼ indicator to expand and see per-event mention history. Each event shows: event title, ticker, date, and `MENTIONED` (green) / `NOT MENTIONED` (red) badge. Includes a **live search input** to filter events within the expansion. Counter shows `N of M` events. Search resets when collapsing/switching to a different word. Only one row expanded at a time.
 
 **Full Transcript Tab:**
 - Plain reading view of all segments in chronological order.
 - Green "S" / orange "X" badges per segment (matching cleaning step style).
 - Non-speaker content greyed/italic with orange left border and attribution labels.
+
+**Data flow:**
+- Sections/segments fetched from `/api/transcripts/[id]/sections` (transcript-scoped, not analysis-scoped)
+- Detections + event words fetched from `/api/transcripts/analyses/[analysisId]` (analysis-scoped)
+- Mention history from `/api/corpus/mention-history?speakerId=X` (includes `events` array per word for expandable rows)
+
+### X Broadcast Transcription (Local Whisper)
+
+Transcribe any X (Twitter) broadcast, Space, or video post using yt-dlp + local Whisper. **Zero API cost** — the 3GB `large-v3` model runs on your Mac. A 45-min broadcast takes ~5-10 min total (30s download + 5-10 min transcription on Apple Silicon).
+
+#### Prerequisites (one-time install)
+
+```bash
+brew install yt-dlp ffmpeg
+brew install pipx
+pipx install whisper-ctranslate2
+```
+
+**First run will download the ~3GB `large-v3` model** from HuggingFace to `~/.cache/huggingface/hub/`. Subsequent runs use the cached model.
+
+**Check everything is installed** — `GET /api/transcripts/x-preflight` returns `{ ready, missing, ytDlp, whisper }`. The UI calls this when the X upload tab is selected and shows actionable install instructions if anything is missing.
+
+#### Architecture (4 layers)
+
+```
+Next.js API route (/api/transcripts/upload-x)
+  │  spawn(scripts/transcribe-x.sh, ..., { detached: true, stdio: "ignore" })
+  │
+  ▼
+Bash wrapper (scripts/transcribe-x.sh)
+  │  setsid nohup node scripts/transcribe-x.mjs ... </dev/null >>logs/... 2>&1 &
+  │  disown
+  │
+  ▼
+Node worker (scripts/transcribe-x.mjs)
+  │  Opens its own logs/transcribe-x.log fd; reopens stdout/stderr to it
+  │  Runs yt-dlp → ffmpeg (extract audio) → whisper-ctranslate2 → writes to DB
+  │
+  ▼
+Supabase — updates transcripts row in real time (transcription_status, transcription_progress)
+  │
+  ▼
+UI — polls GET /api/transcripts every 3s while any row has status ∈ {downloading, transcribing}
+```
+
+#### Why the bash wrapper is required (critical gotcha)
+
+Spawning node directly from a Next.js API route with `detached: true + stdio: "ignore" + child.unref()` **does NOT survive Next.js dev server restarts/cycles**. Every time Next.js recompiles (HMR on file save), the child gets killed — typically mid-ffmpeg-conversion, after yt-dlp has downloaded 1GB of video but before the audio is extracted.
+
+Empirically verified: the same `transcribe-x.mjs` script runs end-to-end from shell but dies consistently when spawned from Next.js, even with every standard detachment flag set.
+
+**Fix:** [scripts/transcribe-x.sh](scripts/transcribe-x.sh) wraps the node invocation in `setsid nohup ... &` + `disown`. This fully dissociates the process from the parent's session/process group. **Do NOT bypass the shell wrapper** — the routes (`upload-x`, `retry-x`) intentionally spawn via the `.sh`, not directly via `node`.
+
+**The shell wrapper also handles node path discovery:** it tries `~/.nvm/versions/node/v22.15.1/bin/node`, then `/opt/homebrew/bin/node`, then `/usr/local/bin/node`, then `which node`. If you upgrade node via nvm, update the path in `scripts/transcribe-x.sh` OR ensure one of the fallback paths points at the new binary.
+
+#### Worker pipeline (`scripts/transcribe-x.mjs`)
+
+1. **Environment bootstrap** — loads `.env.local` manually (worker runs outside Next.js so env isn't auto-loaded). Reopens stdout/stderr to point at `logs/transcribe-x.log` with ISO timestamps.
+2. **Lockfile guard** — `/tmp/kalshi-whisper/.lock` contains the timestamp of the current run. Only one X transcription can run at a time (Whisper needs the GPU/CPU exclusively). Stale locks older than 60 min are taken over automatically. Released in `fail()` AND in `main()`'s finally block (both needed because `process.exit` bypasses finally).
+3. **Download phase** — `yt-dlp -x --audio-format mp3 --audio-quality 0 --no-playlist -o <workdir>/audio.%(ext)s <url>`. yt-dlp downloads the HLS stream (typically ~1GB for a 45-min broadcast) then ffmpeg extracts just the audio track to mp3 (~47MB). yt-dlp handles both steps — do not try to avoid the intermediate mp4.
+4. **Progress parsing** — worker regex-matches yt-dlp stderr (`[download] 45.3% of 120MiB`) and whisper stderr (`[00:12:34.000 --> ...]`) and throttles DB writes to every 3s via `lastProgressWrite`. UI reads the `transcription_progress` text field.
+5. **Transcription phase** — `whisper-ctranslate2 <audio.mp3> --model large-v3 --language en --output_format txt --vad_filter True --compute_type auto --verbose True`. VAD filter is critical for avoiding silence-induced hallucinations on long recordings. `compute_type auto` picks int8/float16 depending on hardware.
+6. **Post-processing** — reads `<audio_stem>.txt`, collapses whitespace, validates length ≥ 100 chars. Writes `full_text`, `raw_text`, `word_count`, flips `transcription_status='done'` + `cleaning_status='pending'` so the existing clean → section → detect words pipeline picks up seamlessly.
+7. **Cleanup** — on success, deletes the entire workdir. On failure, keeps the workdir for debugging.
+
+#### API routes
+
+- **`POST /api/transcripts/upload-x`** — validates X URL (regex allows `x.com/i/broadcasts/...`, `x.com/i/spaces/...`, `x.com/<user>/status/<id>`), inserts transcript row with `transcription_status='downloading'` + empty text, spawns the shell wrapper detached, returns the transcript row immediately. Refuses if another row has `transcription_status ∈ {downloading, transcribing}` (concurrency guard at the DB level in addition to the worker-level lockfile).
+- **`POST /api/transcripts/[id]/retry-x`** — for a row with `transcription_status='failed'` and `source_platform='x'`, re-spawns the worker using the existing `source_url`. Refuses if another transcription is active. Clears `transcription_error` and resets status.
+- **`GET /api/transcripts/x-preflight`** — checks `existsSync()` on `/opt/homebrew/bin/yt-dlp` and `~/.local/bin/whisper-ctranslate2`. Returns `{ ready: boolean, missing: string[], ytDlp: string|null, whisper: string|null }`. UI calls this lazily when the X tab is first opened.
+
+#### UI behavior (`TranscriptsTab.tsx`)
+
+- **4th toggle button** — PDF | Text | YouTube | X
+- **Input** — X URL text field + "Use Brave cookies" checkbox (defaults off)
+- **Preflight status** — if tools are missing, shows a red inline error with the install commands before the Upload button can be enabled
+- **Polling** — while any transcript in the list has `transcription_status ∈ {downloading, transcribing}`, the list refreshes every 3s via `fetchTranscripts()`
+- **List badges** — indigo "downloading..." / "transcribing..." / red "failed" badges replace the normal cleaning-status badge for X rows in progress
+- **Right-panel banner** — replaces the clean/section/detect workflow until transcription finishes. Shows animated pulse + current `transcription_progress` text. For failed rows, shows the error + Retry/Delete buttons. Workflow steps only render after `transcription_status !== 'failed' && !== 'downloading' && !== 'transcribing'`.
+
+#### Browser cookies
+
+For Spaces or private broadcasts that require auth, tick "Use Brave cookies". The worker passes `--cookies-from-browser brave` to yt-dlp, which reads cookies from the user's Brave profile (user must be logged into X in Brave).
+
+**To switch browsers** — edit the hardcoded `"brave"` in [scripts/transcribe-x.mjs](scripts/transcribe-x.mjs) (search for `--cookies-from-browser`). yt-dlp supports `brave`, `chrome`, `chromium`, `edge`, `firefox`, `opera`, `safari`, `vivaldi`, `whale`. Also update the label in [TranscriptsTab.tsx](src/components/corpus/TranscriptsTab.tsx) ("Use Brave cookies").
+
+#### Error classification
+
+The worker's `classifyYtDlpError()` function matches yt-dlp's `ERROR:` output lines (not arbitrary text in progress output) and maps to user-friendly messages:
+
+| yt-dlp ERROR contains | User message |
+|---|---|
+| `private`, `login required`, `sign in` | "Content is private or requires login. Try enabling 'Use browser cookies'..." |
+| `unavailable`, `does not exist`, `not found`, `no video formats` | "Broadcast is unavailable or deleted." |
+| `is live`, `livestream`, `still live` | "Live broadcasts still in progress cannot be transcribed. Wait until the broadcast ends." |
+| `geo`, `region`, `country` | "Broadcast is geo-blocked." |
+| (anything else) | "Download failed: `<last 400 chars of stderr>`" |
+
+**Earlier bug (fixed):** original code matched `unavailable` anywhere in stderr, which false-positive-matched on yt-dlp's download progress output during long downloads. The fix: only match inside lines starting with `ERROR:`.
+
+#### Performance expectations
+
+On Apple Silicon (M1/M2/M3 Mac):
+
+| Phase | 45-min broadcast |
+|---|---|
+| yt-dlp download (HLS, ~1GB video) | 30s-7min depending on your bandwidth |
+| ffmpeg audio extraction | ~10-20s |
+| Whisper model load (first run only) | 30-60s + 3GB download on very first run |
+| Whisper transcription | 3-10 min (varies with compute_type + CPU load) |
+| DB write + cleanup | < 1s |
+
+The worker's progress output updates DB every 3s; expect the UI to feel responsive even during long downloads.
+
+#### Concurrency
+
+Only **one X transcription at a time** is allowed. Two layers of guard:
+1. **API layer** (`upload-x`, `retry-x`) — DB query refuses if any row has `transcription_status ∈ {downloading, transcribing}`
+2. **Worker layer** — `/tmp/kalshi-whisper/.lock` file; refuses if lock is < 60 min old
+
+Stale lockfiles older than 60 min are auto-taken-over. If you manually need to clear a stuck state:
+
+```bash
+rm -rf /var/folders/*/T/kalshi-whisper/
+# then update the stuck DB row:
+UPDATE transcripts SET transcription_status='failed', transcription_error='manual cleanup' WHERE transcription_status IN ('downloading','transcribing');
+```
 
 ---
 
@@ -513,27 +701,33 @@ The Briefing tab has been removed. Analysis showed AI-generated opinions were hu
 **Transcript Tab:**
 The Transcript tab is the primary tool for studying past event structure alongside the current event. It lets you create **named transcript sets** — each a curated group of past transcripts — and view them as a **single unified composite view**, as if all the transcripts were one document. You can also drill into individual transcripts within a set.
 
+**URL-backed state:** The tab supports deep links so Cmd/Ctrl+click opens in a new browser tab. URL params: `?tab=compare&setId=<uuid>&view=combined|<transcript-uuid>`. Refresh, back/forward, and browser tabs all work. Built with Next.js `<Link>` components so modifier keys are intercepted correctly.
+
 - **Set List** (default view) — shows all named sets for this event. Each set shows its name, transcript count, and creation date. "New Set" button creates an empty set. Sets are stored in the `event_transcript_sets` table and persist across sessions.
 - **Set View** — after clicking into a set:
   - **Transcript Selector** — dropdown to add/remove completed transcripts from the set (filtered to the event's speaker, max 10). Changes are auto-saved.
-  - **View Toggle** — horizontal toggle row at the top: `[Combined] [Mar 29] [Mar 24] ...` One view at a time. Combined is default.
-  - **Combined View** (`CompositeTranscriptView`) — renders the same visual structure as the single-transcript `TranscriptResultsView` on the Corpus page, but with **merged data from all transcripts in the set**:
+  - **View Selector** — `[Combined]` pill tab (default) + a dropdown to pick an individual transcript. The dropdown shows full date (with year) + title, sorted most-recent-first. Each dropdown item is a `<Link>` with the full URL — **Cmd/Ctrl+click opens in a new browser tab**, normal click is client-side navigation. One view visible at a time.
+  - **Strict event scoping:** Both Combined and individual views are **strictly scoped to the current research event's strike list**. Only transcripts with a `transcript_analyses` row matching the research event contribute data. This prevents word detections from unrelated events leaking into the view. No fallback to "most recent analysis" — strict match or nothing.
+  - **Missing analyses banner** — if some transcripts in the set lack an analysis against the current research event, an amber banner appears above the Combined view: `"3 of 5 transcripts have no analysis for this event"` with a **"Run analysis for all 3"** button. One click batch-runs analyses (parallel POSTs to `/api/transcripts/[id]/analyses`), then re-fetches composite data so they appear immediately.
+  - **Combined View** (`CompositeTranscriptView`) — renders the same visual structure as the single-transcript `TranscriptResultsView` on the Corpus page, but with **merged data from all transcripts in the set** (only those with analyses for the current event):
     - Category badges with aggregated section counts across all transcripts
     - Distribution bar showing combined category proportions (speaker word counts across all transcripts)
     - Strikes bar with aggregated word counts
     - Section cards from all transcripts, each with a transcript-origin label (e.g. "Mar 29"). Sections can be viewed in speech order (grouped by source transcript) or by category.
     - Word Analysis table with aggregated counts, section spread (N/total across all transcripts), R/Q breakdown, dominant category, "In" column showing X/Y (how many transcripts contain that word), Kalshi rate, sample size
+    - **Category filter chips** — same as individual view: multi-select OR filter by dominant category, with live count
+    - **Expandable event-by-event rows** — click any word with a ▼ to see per-event mention history with inline search
     - **No Full Transcript tab** in the combined view — that only makes sense for individual transcripts
-    - **Event words** (the YES/NO "Mentioned" column) come from the **Kalshi events linked to the selected transcripts**, NOT the current research event. A "NO" means a word existed as a strike in one of those past events but wasn't detected in the transcript.
-  - **Individual View** — clicking a specific transcript in the toggle shows the full `TranscriptResultsView` (all 3 tabs: Structure, Word Analysis, Full Transcript) for that single transcript, reusing the same component from the Corpus page.
+    - **Event words** come from the **current research event**, NOT the linked events of the selected transcripts. A "NO" means a word is a strike in the current event but wasn't detected in the transcript.
+  - **Individual View** — selecting a transcript from the dropdown opens `TranscriptResultsView` scoped to the analysis against the **current research event**. If the transcript has no analysis for this event, an empty state with a **"Run analysis against this event"** button is shown instead. Same `original`/`cross` badges, category filter chips, and expandable event-by-event rows as the Corpus view.
 
 **Component architecture:**
 ```
-CompareTab (orchestrator — manages set list, data fetching, view state)
+CompareTab (orchestrator — manages set list, data fetching, view state, URL sync)
 ├─ TranscriptSetList (list + create/delete sets)
 ├─ TranscriptSelector (multi-select dropdown for adding transcripts)
-├─ CompositeTranscriptView (merged Structure + Word Analysis)
-└─ TranscriptResultsView (individual drill-in, reused from corpus)
+├─ CompositeTranscriptView (merged Structure + Word Analysis, event-scoped)
+└─ TranscriptResultsView (individual drill-in, analysis-scoped, reused from corpus)
 ```
 
 **API endpoints:**
@@ -541,7 +735,9 @@ CompareTab (orchestrator — manages set list, data fetching, view state)
 - `POST /api/events/transcript-sets` — create set `{ eventId, name, transcriptIds }`
 - `PATCH /api/events/transcript-sets/[id]` — update set `{ name?, transcriptIds? }`
 - `DELETE /api/events/transcript-sets/[id]` — delete set
-- `GET /api/transcripts/compare?ids=uuid1,uuid2&speakerId=X` — batch fetch sections, segments, word detections, and event words for multiple transcripts in 5 parallel Supabase queries. Returns `{ transcripts, sections, segments, wordDetections, eventWords, categories }`.
+- `GET /api/transcripts/compare?ids=uuid1,uuid2&eventId=<research-event-id>&speakerId=X` — batch fetch sections, segments, word detections, and event words. **Strict event scoping:** only returns transcripts with a `transcript_analyses` row matching `eventId`. Returns `{ transcripts, sections, segments, wordDetections, eventWords, categories, missingTranscriptIds }`. `missingTranscriptIds` lists transcript IDs from `ids` that have no analysis for this event.
+- `GET /api/transcripts/[id]/analyses` — list analyses for a transcript (used to resolve which analysis to show for the individual view)
+- `POST /api/transcripts/[id]/analyses` — create analysis + run detection `{ eventId }` (used by "Run analysis" buttons)
 
 **Sources Tab:**
 - Transcripts found by historical agent
@@ -840,7 +1036,7 @@ The primary word analysis table on the research page. Always visible regardless 
 - **Refresh Markets button** — Fetches latest market prices from Kalshi API
 - **Sortable columns** — Word, Yes Price, Historical Rate, Edge (default sort: edge descending)
 - **No Price column** — Shows the No-side ask price alongside the Yes-side ask price. Derived from `1 - yesAsk` on initial load (before WebSocket data arrives), then updated via WebSocket `noAsk` (computed as `1 - yesBid`) once live data flows in. See [Price Architecture](#price-architecture-yes--no) below.
-- **Expandable rows** — Click a word row to see event-by-event mention history (which events the word was mentioned in, with dates and MENTIONED/NOT MENTIONED badges)
+- **Expandable rows** — Click a word row to see event-by-event mention history (which events the word was mentioned in, with dates and MENTIONED/NOT MENTIONED badges). Includes a **live search input** to filter events within the expanded block. Counter shows `N of M` events. Search resets when collapsing or switching to a different expanded word.
 - **Color-coded rates** — Historical rate badges: green (>=60%), yellow (>=30%), red (>0%), grey (no data)
 - **Edge coloring** — Uses `edgeColor()` from `ui-utils.ts` for positive/negative edge styling
 
@@ -1164,8 +1360,8 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | `/api/corpus/mention-history` | GET | Get word mention history |
 | `/api/corpus/kalshi-series` | GET | Search Kalshi for series |
 | `/api/corpus/quick-prices` | GET | Quick market price lookup. Returns `yesBid`, `yesAsk`, `noAsk`, `lastPrice`, `volume` per market |
-| `/api/corpus/speakers/categories` | GET/POST | GET: List speaker categories. Supports `?speakerId=X&status=pending` filter. POST: Create a new speaker category `{ speakerId, name, status? }`. Defaults to `status: "pending"`. Uses upsert on `(speaker_id, name)` to avoid duplicates. Auto-assigns next `order_index`. |
-| `/api/corpus/speakers/categories/rename` | POST | Rename a category everywhere — updates `speaker_categories` row + all `transcript_sections` across speaker's transcripts |
+| `/api/corpus/speakers/categories` | GET/POST | **Global (as of migration 020).** GET: list all global categories. Optional `?status=pending` filter. `speakerId` query param accepted and ignored. POST: Create a new category `{ name, status? }`. Defaults to `status: "pending"`. If the name already exists, returns the existing row as-is (no duplicate). Auto-assigns next global `order_index`. |
+| `/api/corpus/speakers/categories/rename` | POST | **Global rename.** Body: `{ oldName, newName }` — speakerId removed from signature. Updates the canonical `speaker_categories` row + propagates to every `transcript_sections.category_name` across ALL speakers. |
 | `/api/corpus/series/events` | GET | Now supports `?speakerId=X&all=1` to return ALL events across all series for a speaker (for transcript upload dropdown) |
 
 ### Transcripts
@@ -1176,7 +1372,9 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | `/api/transcripts/upload` | POST | Upload a transcript (text) |
 | `/api/transcripts/upload-pdf` | POST | Upload PDF transcript (pdf-parse v2, factbase text cleaning) |
 | `/api/transcripts/upload-youtube` | POST | Extract and upload YouTube transcript. Body: `{ speakerId, youtubeUrl, title?, eventId?, eventDate?, sourceUrl? }`. Uses `youtube-transcript` npm package. |
-| `/api/transcripts/compare` | GET | Batch fetch transcript data for composite view. Query: `?ids=uuid1,uuid2&speakerId=X`. Returns `{ transcripts, sections, segments, wordDetections, eventWords, categories }`. 5 parallel Supabase queries. |
+| `/api/transcripts/upload-x` | POST | **Start async X broadcast transcription.** Body: `{ speakerId, xUrl, title?, eventId?, eventDate?, sourceUrl?, useCookies? }`. Inserts transcript row with `transcription_status='downloading'` + empty text, spawns `scripts/transcribe-x.sh` detached, returns transcript row immediately. Refuses with 409 if another transcription is active. UI polls `/api/transcripts` for status. See [X Broadcast Transcription](#x-broadcast-transcription-local-whisper). |
+| `/api/transcripts/x-preflight` | GET | Check if `yt-dlp` and `whisper-ctranslate2` are installed. Returns `{ ready: boolean, missing: string[], ytDlp: string|null, whisper: string|null }`. UI calls this when the X upload tab opens. |
+| `/api/transcripts/compare` | GET | Batch fetch transcript data for composite view. Query: `?ids=uuid1,uuid2&speakerId=X`. Returns `{ transcripts, sections, segments, wordDetections, eventWords, categories }`. 5 parallel Supabase queries. **As of migration 020, `speakerId` param is ignored** — categories are global. |
 | `/api/transcripts/frequencies` | GET | Get word frequencies across transcripts |
 | `/api/transcripts/[id]` | GET/DELETE/PATCH | Get, delete, or update transcript (needs_review, completed flags) |
 | `/api/transcripts/[id]/download` | GET | Download transcript text |
@@ -1186,6 +1384,7 @@ Returns: `{ summary, diagnostics, dailyPnl, cumulativePnl, events, trades }`
 | `/api/transcripts/[id]/detect-words` | POST | Run word detection across approved sections. Accepts optional `eventId` or `words` array. |
 | `/api/transcripts/[id]/word-detections` | GET | Load saved word detection results (section-level + totals) |
 | `/api/transcripts/[id]/split-segment` | POST | Split a segment into 2-3 pieces at a text selection. Body: `{ segmentId, startOffset, endOffset }` (character offsets into the segment's text). Deletes the original segment, shifts `order_index` of all subsequent segments, inserts new segments with flipped `is_speaker_content` on the selected portion. Returns the full updated segments array for the transcript. |
+| `/api/transcripts/[id]/retry-x` | POST | Retry a failed X transcription. Uses the existing `source_url` to re-spawn the worker. Refuses if another transcription is active or if `source_platform !== 'x'`. Clears `transcription_error` and resets status to `downloading`. |
 
 ### Other
 
@@ -1405,7 +1604,7 @@ npm start
 
 ## Migrations
 
-All 18 migrations (001-018) are in `supabase/migrations/` and have been applied to the live database.
+All 21 migrations (001-021) are in `supabase/migrations/` and have been applied to the live database.
 
 | # | File | Description |
 |---|------|-------------|
@@ -1427,6 +1626,9 @@ All 18 migrations (001-018) are in `supabase/migrations/` and have been applied 
 | 016 | `016_category_status.sql` | Adds `status TEXT NOT NULL DEFAULT 'approved'` (CHECK: pending/approved) to `speaker_categories` for the category approval flow |
 | 017 | `017_event_transcript_sets.sql` | `event_transcript_sets` table: `id UUID PK`, `event_id UUID FK → events (CASCADE)`, `name TEXT`, `transcript_ids UUID[]`, `created_at`, `updated_at`. `UNIQUE(event_id, name)`. RLS enabled with allow-all policy. Stores named transcript groups for the Transcript tab on the research page. |
 | 018 | `018_trade_strategy.sql` | `trades.strategy TEXT NOT NULL DEFAULT 'v1'` — tags trades by trading strategy. All existing trades default to `v1` (AI-guided legacy). New trades logged via the UI get `strategy='v2'` (transcript-driven current). Index `idx_trades_strategy`. Analytics and Trade Analytics pages default to showing v2 trades only, with a toggle to view v1 legacy data. |
+| 019 | `019_transcription_status.sql` | Adds async transcription tracking columns on `transcripts`: `transcription_status` (CHECK: downloading/transcribing/done/failed), `transcription_error TEXT`, `transcription_progress TEXT`, `source_platform` (CHECK: pdf/text/youtube/x). Partial index `idx_transcripts_transcription_status` WHERE status IN ('downloading','transcribing') for efficient polling queries. Used by the X broadcast transcription flow — existing PDF/Text/YouTube rows have these columns null (async flow is only X). |
+| 020 | `020_global_categories.sql` | **Makes categories global.** Drops `speaker_id` column from `speaker_categories`. Changes unique constraint from `(speaker_id, name)` to `(name)` alone. Backfill logic: (1) nulls out any `transcript_sections` labeled "Other" so user reassigns in UI, (2) picks canonical row per name (approved first, oldest `created_at` as tiebreaker), (3) remaps all `transcript_sections.category_id` to canonical IDs, (4) deletes non-canonical duplicates + all "Other" rows, (5) promotes any remaining pending duplicates to approved. Post-migration: 12 canonical approved categories. `idx_speaker_categories_speaker` index and FK dropped. |
+| 021 | `021_transcript_analyses.sql` | **Decouples word detection from transcript ownership.** Creates `transcript_analyses` table (`id UUID PK`, `transcript_id FK → transcripts CASCADE`, `event_id FK → events CASCADE`, `created_at`, `UNIQUE(transcript_id, event_id)`). Adds `analysis_id UUID FK → transcript_analyses CASCADE` to both `section_word_detections` and `transcript_word_detections`. Backfills one analysis per completed transcript with event_id set, re-keys existing detections, deletes orphans, makes `analysis_id NOT NULL`. Swaps unique constraints from `(section_id, word)` / `(transcript_id, word)` to `(analysis_id, section_id, word)` / `(analysis_id, word)`. RLS enabled with allow-all SELECT. Indexes on `transcript_id`, `event_id`, `analysis_id`. A transcript can now have many saved analyses (one per event), each with independent detection results. |
 
 To apply new migrations, use the Supabase Management API (never ask the user to do it manually):
 
@@ -1878,11 +2080,48 @@ Upload → Clean → Approve Cleaning → Section → Approve Categories → App
 
 Only transcripts with `completed = true` show in the full-width `TranscriptResultsView`. In-progress transcripts show the step-by-step workflow panel. The transcript list shows a green "completed" badge for finished transcripts, or individual step status badges (pending/cleaned/approved) for in-progress ones.
 
-### Category Approval Flow
+### Category Approval Flow (Global)
 
-New categories are written to `speaker_categories` with `status = 'pending'` immediately when the AI proposes them during sectioning. They persist across page refreshes (stored in DB, loaded on component mount via `GET /api/corpus/speakers/categories?speakerId=X&status=pending`). The sectioning step shows a banner for pending categories. All pending categories must be resolved (approved or rejected) before sections can be approved. Re-sectioning deletes all pending categories first to avoid duplicates from previous runs.
+As of **migration 020**, categories are global across all speakers (not per-speaker). New categories are written to `speaker_categories` with `status = 'pending'` immediately when the AI proposes them during sectioning. They persist across page refreshes (stored in DB, loaded on component mount via `GET /api/corpus/speakers/categories?status=pending`). The sectioning step shows a banner for pending categories. All pending categories must be resolved (approved or rejected) before sections can be approved. Re-sectioning **deletes ALL pending categories globally** first (not just same-speaker) to avoid duplicates from previous runs.
+
+**When a new category is approved:** **every** completed transcript across all speakers is flagged with `needs_review = true` and a review banner (not just the current speaker's transcripts). Rationale: a new global category might apply to past transcripts from any speaker.
+
+**Rename propagation:** `POST /api/corpus/speakers/categories/rename` with `{ oldName, newName }` (no speakerId) updates the canonical `speaker_categories` row + every `transcript_sections.category_name` across all speakers.
 
 **Bug fix — category detection (applied):** The original code relied solely on the AI's `new_categories` array in its JSON response to know which categories to create as pending. However, the AI was unreliable — it would use category names like "Foreign Policy" on sections but fail to include them in `new_categories`. This caused categories to silently never be proposed for approval. The fix (in `/api/transcripts/[id]/sections/route.ts`) scans **all `category` values from the AI's sections** and creates pending entries for any that don't already exist in `speaker_categories`, regardless of whether the AI listed them in `new_categories`. This ensures every category used by the AI is surfaced for approval.
+
+**AI sectioning prompt changes for global categories:** the sectioning prompt now says *"EXISTING GLOBAL CATEGORIES (shared across all speakers)"* and instructs the AI to *"strongly prefer existing"* before proposing new categories. Rationale: minimize unnecessary drift/duplicates since the user must manually review each new proposal.
+
+### Spawning Long-Running Processes from Next.js Routes
+
+**The gotcha:** calling `spawn("node", [...], { detached: true, stdio: "ignore" })` + `child.unref()` from a Next.js API route **does NOT reliably produce a process that survives Next.js dev server HMR/recompile cycles** on macOS. Empirically, spawned node children get killed ~30s–1min after launch, typically mid-work, even with every standard detachment flag set.
+
+**The fix (used by the X transcription flow):** wrap the node invocation in a bash script that uses `setsid nohup ... &` + `disown`. See [scripts/transcribe-x.sh](scripts/transcribe-x.sh) for the reference implementation. The API routes spawn the `.sh` wrapper instead of `node` directly.
+
+**The worker itself also reopens stdout/stderr** to point at its own log file ([scripts/transcribe-x.mjs](scripts/transcribe-x.mjs) top-of-file). This is belt-and-suspenders — even if stdio fds somehow got inherited, the reopen protects against EPIPE.
+
+**When to use this pattern:** any long-running async work (> 30s) kicked off from a Next.js API route that needs to survive dev server cycles. For shorter-lived tasks that complete within the request window, standard `spawn` is fine.
+
+**Earlier (failed) attempts, for reference:**
+- `spawn("node", [...], { detached: true, stdio: "ignore" })` + `child.unref()` — child dies on HMR
+- Opening log fds in the route and passing `stdio: [ignore, outFd, errFd]` — dies when fd ownership transfers
+- Worker's internal `process.stdout.write` reopen — survives fd death but not SIGHUP from parent group
+
+Only `setsid + nohup + disown + background &` via a shell wrapper consistently survives.
+
+### Local Whisper Transcription Notes
+
+**Model choice:** `large-v3` (~3GB) is used. The Whisper API uses an equivalent model internally, so local quality should match API quality. Smaller models (`medium`, `small`, `base`) are faster but lose accuracy, especially on noisy audio.
+
+**Compute type:** `--compute_type auto` lets CTranslate2 pick int8/float16 based on hardware. On Apple Silicon, expect ~0.5x real-time on CPU (45 min audio → 10-20 min transcription). Metal GPU support in CTranslate2 is limited — if transcription is too slow, bumping the model down to `medium` or `large-v3-turbo` is the easiest win.
+
+**VAD filter:** `--vad_filter True` skips silent segments and is critical for avoiding repetition-loop hallucinations on long recordings. Do not disable unless you have a reason.
+
+**Model cache:** first run downloads to `~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/`. Subsequent runs reuse the cache. If the cache is corrupted, delete that directory to force a fresh download.
+
+**Progress output parsing:** whisper-ctranslate2's `--verbose True` emits lines like `[00:12:34.000 --> 00:12:40.000] text...`. The worker regex-matches the timestamps and writes progress updates every 3s. If the model is still loading (no timestamps yet), progress shows "Loading Whisper model...".
+
+**Disk management:** the worker uses `/var/folders/.../T/kalshi-whisper/<transcript-id>/` (macOS equivalent of `/tmp`) as workdir. Audio files can be 100-300MB per broadcast. Successful runs clean up immediately; failed runs keep the workdir for debugging. The worker's `cleanupStaleWorkdirs()` deletes any workdir older than 24h on every run.
 
 ### Cached Transcripts Deleted
 
@@ -2030,19 +2269,39 @@ Check: do the raw fills have `count` (old) or `count_fp` (new)? Do they have `ye
 ### What's been built
 
 **Transcript Management System (Corpus page → Transcripts tab):**
-- Three upload modes: PDF (factbase/Roll Call), text paste, YouTube transcript extraction
+- **Four upload modes:** PDF (factbase/Roll Call), text paste, YouTube transcript extraction, **X broadcast transcription** (yt-dlp + local Whisper)
 - 3-step workflow: AI Clean (speaker/non-speaker tagging) → AI Section (topic sections with content categories) → Detect Words (regex strike detection per section)
 - **Cleaning AI produces short segments** (100-200 words) by breaking at topic transitions — ensures downstream sectioning assigns accurate categories
 - **Segment splitting in cleaning step** — highlight text within a segment → floating button → splits into 2-3 pieces with selected portion's speaker status flipped. API: `POST /api/transcripts/[id]/split-segment`
-- Per-speaker category system with pending/approved flow, rename propagation, retro-classification flagging
+- **Global category system (migration 020)** with pending/approved flow, global rename propagation, global retro-classification flagging. 12 canonical categories. See [Categories (Global)](#categories-global--applies-to-all-speakers).
 - **Custom category creation in sectioning step** — "+ Create new..." at bottom of each section's category dropdown. Creates as pending, appears in approval banner. Uses `POST /api/corpus/speakers/categories`
-- **Full category library in dropdown** — shows all approved + pending speaker categories, not just ones used in current transcript's sections
+- **Full category library in dropdown** — shows all approved + pending global categories, not just ones used in current transcript's sections
 - Category detection fix: scans all AI section categories (not just AI's `new_categories` array) to ensure all categories are surfaced for approval
 - **Estimated duration** on transcript list (`~X min` badge) and TranscriptResultsView header, calculated from `word_count / 145`
 - Completed transcript results view with three tabs:
   - Structure: category bar + distribution bar + strikes bar + chronological/category-grouped sections with hover/pin filtering
   - Word Analysis: table with Mentioned, Count, Sections (spread), Dom. Category, R/Q breakdown, Kalshi Rate, Sample
   - Full Transcript: plain reading view with speaker/non-speaker badges
+
+**X Broadcast Transcription (local Whisper, migration 019):**
+- 4th upload mode on Transcripts tab — paste an X URL, worker downloads audio via yt-dlp + transcribes via whisper-ctranslate2 (`large-v3` model)
+- **Completely free** — no API costs; everything runs locally on Apple Silicon
+- **Async flow with polling** — route returns immediately, UI polls `/api/transcripts` every 3s for `transcription_status` updates
+- Worker architecture: route → bash wrapper (`transcribe-x.sh`, `setsid+nohup+disown`) → node worker (`transcribe-x.mjs`). Bash wrapper is **critical** — direct `spawn("node")` from Next.js doesn't survive HMR even with `detached+unref+stdio:ignore`. See [Spawning Long-Running Processes from Next.js Routes](#spawning-long-running-processes-from-nextjs-routes).
+- Preflight endpoint (`/api/transcripts/x-preflight`) checks yt-dlp + whisper-ctranslate2 are installed
+- Retry endpoint (`/api/transcripts/[id]/retry-x`) for failed transcriptions
+- Lockfile guard — only one X transcription can run at a time (Whisper needs GPU/CPU exclusively)
+- Smart error classification — only matches yt-dlp `ERROR:` lines, not progress-text false-positives
+- Browser cookies for private content — hardcoded to `brave`; change in [scripts/transcribe-x.mjs](scripts/transcribe-x.mjs)
+- Performance: 45-min broadcast → ~5-10 min total (~30s download on fast connection + ~5-10 min transcription). First run also downloads 3GB `large-v3` model to `~/.cache/huggingface/`.
+
+**Global Categories Migration (Migration 020):**
+- Dropped `speaker_id` from `speaker_categories` — categories now shared across all speakers
+- Deduplicated to 12 canonical approved categories (Border & Immigration, Budget & Finance, Economy, Foreign Policy, General, Government Relations, Healthcare, Insurance & Fraud, Law & Order, Military / Defense, Opening Remarks, Values)
+- Rename propagates globally to every `transcript_sections` row
+- Retro-review flags every completed transcript across all speakers (not just same-speaker) when new category approved
+- API routes `/api/corpus/speakers/categories`, `.../rename`, `/api/transcripts/compare` no longer require `speakerId` for category operations (query param still accepted but ignored for backwards compat)
+- AI sectioning prompt updated: says "GLOBAL CATEGORIES (shared across all speakers)" and instructs AI to "strongly prefer existing"
 
 **Transcript Tab on Research Page (formerly "Compare"):**
 - 4th tab on the research page: Research → Transcript → Sources → Trade Log
@@ -2080,7 +2339,7 @@ Check: do the raw fills have `count` (old) or `count_fp` (new)? Do they have `ye
 - Trade recommendations removed from synthesizer prompt (~140 lines stripped)
 - All 138 AI-cached summary transcripts deleted
 - Bulk corpus import for all 14 speakers across 30 series
-- Migrations 001-018 all applied
+- Migrations 001-020 all applied
 
 ### Next Steps
 

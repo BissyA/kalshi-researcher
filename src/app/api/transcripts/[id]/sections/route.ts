@@ -17,8 +17,8 @@ interface SectioningResult {
 
 function buildSectioningPrompt(existingCategories: string[]): string {
   const catSection = existingCategories.length > 0
-    ? `\nEXISTING CATEGORIES for this speaker:\n${existingCategories.map((c) => `- ${c}`).join("\n")}\n\nAssign each section to one of these categories. If a section genuinely does not fit ANY existing category, propose a new category name — but prefer using existing ones. New categories should be broad topic areas (e.g. "Healthcare", "Trade & Tariffs"), NOT structural labels.\n`
-    : `\nThis is the FIRST transcript for this speaker, so no categories exist yet. Propose appropriate content categories based on the topics covered. Categories should be broad topic areas like "Economy", "Foreign Policy", "Military / Defense", "Border & Immigration", "Healthcare", "Law & Order", etc. Do NOT use structural labels like "Opening", "Q&A", "Closing", "Remarks" as categories — those go in section_type.\n`;
+    ? `\nEXISTING GLOBAL CATEGORIES (shared across all speakers):\n${existingCategories.map((c) => `- ${c}`).join("\n")}\n\nStrongly prefer assigning each section to one of these existing categories. Only propose a NEW category if no existing one genuinely fits — and even then, think hard about whether a slight reframing would fit an existing one. Categories are shared across every speaker, so consistency matters. New categories should be broad topic areas (e.g. "Healthcare", "Trade & Tariffs"), NOT structural labels.\n`
+    : `\nNo categories exist yet. Propose appropriate content categories based on the topics covered. Categories should be broad topic areas like "Economy", "Foreign Policy", "Military / Defense", "Border & Immigration", "Healthcare", "Law & Order", etc. Do NOT use structural labels like "Opening", "Q&A", "Closing", "Remarks" as categories — those go in section_type.\n`;
 
   return `You are a speech/transcript structure analyst. You will receive a transcript that has been split into ordered segments. Your job is to group these segments into logical SECTIONS (topic blocks) and assign each section a content CATEGORY.
 
@@ -90,7 +90,7 @@ export async function POST(
   // Verify transcript is approved for cleaning
   const { data: transcript, error: fetchError } = await supabase
     .from("transcripts")
-    .select("id, cleaning_status, speaker, speaker_id")
+    .select("id, cleaning_status, speaker")
     .eq("id", id)
     .single();
 
@@ -116,16 +116,12 @@ export async function POST(
     return NextResponse.json({ error: "No segments found" }, { status: 400 });
   }
 
-  // Load existing categories for this speaker
-  let existingCategories: string[] = [];
-  if (transcript.speaker_id) {
-    const { data: cats } = await supabase
-      .from("speaker_categories")
-      .select("name")
-      .eq("speaker_id", transcript.speaker_id)
-      .order("order_index");
-    existingCategories = (cats ?? []).map((c) => c.name);
-  }
+  // Load global categories (shared across all speakers)
+  const { data: cats } = await supabase
+    .from("speaker_categories")
+    .select("name")
+    .order("order_index");
+  const existingCategories: string[] = (cats ?? []).map((c) => c.name);
 
   // Set status to processing
   await supabase
@@ -168,14 +164,12 @@ export async function POST(
       .update({ section_id: null })
       .eq("transcript_id", id);
 
-    // Clean up pending categories from previous runs (approved ones stay)
-    if (transcript.speaker_id) {
-      await supabase
-        .from("speaker_categories")
-        .delete()
-        .eq("speaker_id", transcript.speaker_id)
-        .eq("status", "pending");
-    }
+    // Clean up pending categories from previous runs (approved ones stay).
+    // Global: removes all pending rows, regardless of speaker.
+    await supabase
+      .from("speaker_categories")
+      .delete()
+      .eq("status", "pending");
 
     // Persist new categories as 'pending' immediately
     // Don't rely solely on AI's new_categories — scan all category names used
@@ -199,12 +193,11 @@ export async function POST(
       }
     }
 
-    if (transcript.speaker_id && allNewCats.length > 0) {
-      // Get current max order_index
+    if (allNewCats.length > 0) {
+      // Get current max order_index across all global categories
       const { data: existingCatsForOrder } = await supabase
         .from("speaker_categories")
         .select("order_index")
-        .eq("speaker_id", transcript.speaker_id)
         .order("order_index", { ascending: false })
         .limit(1);
 
@@ -214,23 +207,20 @@ export async function POST(
         await supabase
           .from("speaker_categories")
           .upsert(
-            { speaker_id: transcript.speaker_id, name: catName, status: "pending", order_index: nextOrder },
-            { onConflict: "speaker_id,name" }
+            { name: catName, status: "pending", order_index: nextOrder },
+            { onConflict: "name" }
           );
         nextOrder++;
       }
     }
 
-    // Resolve category IDs for ALL categories (including newly inserted pending ones)
+    // Resolve category IDs for ALL categories (global list)
     const categoryIdMap = new Map<string, string>();
-    if (transcript.speaker_id) {
-      const { data: allCats } = await supabase
-        .from("speaker_categories")
-        .select("id, name")
-        .eq("speaker_id", transcript.speaker_id);
-      for (const c of allCats ?? []) {
-        categoryIdMap.set(c.name.toLowerCase(), c.id);
-      }
+    const { data: allCats } = await supabase
+      .from("speaker_categories")
+      .select("id, name");
+    for (const c of allCats ?? []) {
+      categoryIdMap.set(c.name.toLowerCase(), c.id);
     }
 
     // Insert sections and assign segments
@@ -359,30 +349,20 @@ export async function PATCH(
   }
 
   if (action === "approve") {
-    // Get transcript to find speaker_id
-    const { data: transcript } = await supabase
-      .from("transcripts")
-      .select("speaker_id")
-      .eq("id", id)
-      .single();
-
-    const speakerId = transcript?.speaker_id;
-
-    // Approve pending categories — set status to 'approved'
-    if (speakerId && Array.isArray(approvedCategories) && approvedCategories.length > 0) {
+    // Approve pending categories — set status to 'approved' (global)
+    if (Array.isArray(approvedCategories) && approvedCategories.length > 0) {
       for (const catName of approvedCategories) {
         await supabase
           .from("speaker_categories")
           .update({ status: "approved" })
-          .eq("speaker_id", speakerId)
           .eq("name", catName);
       }
 
-      // Trigger retro-classification for other transcripts of this speaker
+      // Trigger retro-classification for ALL other completed transcripts
+      // (not just same speaker) — new global categories may apply anywhere.
       const { data: otherTranscripts } = await supabase
         .from("transcripts")
         .select("id")
-        .eq("speaker_id", speakerId)
         .eq("sectioning_status", "approved")
         .neq("id", id);
 
@@ -399,20 +379,19 @@ export async function PATCH(
     }
 
     // Reject pending categories — delete from speaker_categories, clear from sections
-    if (speakerId && Array.isArray(rejectedCategories) && rejectedCategories.length > 0) {
+    if (Array.isArray(rejectedCategories) && rejectedCategories.length > 0) {
       for (const catName of rejectedCategories) {
-        // Clear category from any sections using it
+        // Clear category from any sections in this transcript using it
         await supabase
           .from("transcript_sections")
           .update({ category_name: null, category_id: null })
           .eq("transcript_id", id)
           .eq("category_name", catName);
 
-        // Delete the pending category
+        // Delete the pending category (global)
         await supabase
           .from("speaker_categories")
           .delete()
-          .eq("speaker_id", speakerId)
           .eq("name", catName)
           .eq("status", "pending");
       }
@@ -423,6 +402,9 @@ export async function PATCH(
       .update({
         sectioning_status: "approved",
         sectioned_at: new Date().toISOString(),
+        needs_review: false,
+        review_reason: null,
+        completed: true,
       })
       .eq("id", id);
 

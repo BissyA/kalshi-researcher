@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { Fragment, useState, useEffect, useCallback } from "react";
 import type { DbTranscript, DbTranscriptSection, DbTranscriptSegment } from "@/types/database";
+import type { MentionEventDetail } from "@/types/corpus";
 
 interface SectionWordResult {
   sectionId: string;
@@ -11,8 +12,12 @@ interface SectionWordResult {
 
 interface TranscriptResultsViewProps {
   transcript: DbTranscript;
+  analysisId?: string;
+  eventTitle?: string | null;
+  isSelfAnalysis?: boolean;
   onBack: () => void;
   onDelete: () => Promise<void>;
+  onReopen?: () => Promise<void>;
 }
 
 const categoryColors: Record<string, string> = {
@@ -62,7 +67,7 @@ interface CategoryInfo {
   sectionIds: Set<string>;
 }
 
-export function TranscriptResultsView({ transcript, onBack, onDelete }: TranscriptResultsViewProps) {
+export function TranscriptResultsView({ transcript, analysisId, eventTitle, isSelfAnalysis, onBack, onDelete, onReopen }: TranscriptResultsViewProps) {
   const [sections, setSections] = useState<DbTranscriptSection[]>([]);
   const [segments, setSegments] = useState<DbTranscriptSegment[]>([]);
   const [results, setResults] = useState<SectionWordResult[]>([]);
@@ -77,8 +82,11 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
   const [sectionSort, setSectionSort] = useState<"speech" | "category">("speech");
   const [loading, setLoading] = useState(true);
 
-  // Mention history (Kalshi rates)
-  const [mentionData, setMentionData] = useState<Record<string, { rate: number; yes: number; total: number }>>({});
+  // Mention history (Kalshi rates + per-event detail for expandable rows)
+  const [mentionData, setMentionData] = useState<Record<string, { rate: number; yes: number; total: number; events: MentionEventDetail[] }>>({});
+  const [expandedWord, setExpandedWord] = useState<string | null>(null);
+  const [eventSearch, setEventSearch] = useState("");
+  useEffect(() => { setEventSearch(""); }, [expandedWord]);
   // Event words (strikes for the linked event)
   const [eventWords, setEventWords] = useState<{ word: string }[]>([]);
 
@@ -86,6 +94,15 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
   const [wordSortKey, setWordSortKey] = useState<"word" | "count" | "sections" | "kalshiRate">("count");
   const [wordSortAsc, setWordSortAsc] = useState(false);
   const [wordSearch, setWordSearch] = useState("");
+  const [wordCategoryFilter, setWordCategoryFilter] = useState<Set<string>>(new Set());
+
+  function toggleWordCategoryFilter(name: string) {
+    setWordCategoryFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  }
 
   const hasPins = pinnedCategories.size > 0 || pinnedWords.size > 0;
 
@@ -113,44 +130,54 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [secRes, detRes, mentionRes] = await Promise.all([
+      const [secRes, analysisRes, mentionRes] = await Promise.all([
         fetch(`/api/transcripts/${transcript.id}/sections`),
-        fetch(`/api/transcripts/${transcript.id}/word-detections`),
+        analysisId
+          ? fetch(`/api/transcripts/analyses/${analysisId}`)
+          : Promise.resolve(null),
         transcript.speaker_id
           ? fetch(`/api/corpus/mention-history?speakerId=${transcript.speaker_id}`)
           : Promise.resolve(null),
       ]);
       const secData = await secRes.json();
-      const detData = await detRes.json();
-
       setSections(secData.sections ?? []);
       setSegments(secData.segments ?? []);
-      setResults(detData.details ?? []);
-      setWordsFound(detData.wordsFound ?? 0);
-      setTotalMentions(detData.totalMentions ?? 0);
 
-      // Fetch event words if linked — reuse the research API which already loads words for an event
-      if (transcript.event_id) {
-        try {
-          const ewRes = await fetch(`/api/research/${transcript.event_id}`);
-          if (ewRes.ok) {
-            const ewData = await ewRes.json();
-            setEventWords((ewData.words ?? []).map((w: { word: string }) => ({ word: w.word })));
-          }
-        } catch {
-          // ignore
+      if (analysisRes) {
+        const aData = await analysisRes.json();
+        // Build per-section details from analysis-scoped section_word_detections
+        const sectionMap = new Map<string, { word: string; count: number }[]>();
+        for (const d of aData.sectionDetections ?? []) {
+          const list = sectionMap.get(d.section_id) ?? [];
+          list.push({ word: d.word, count: d.mention_count });
+          sectionMap.set(d.section_id, list);
         }
+        const details = (secData.sections ?? []).map((sec: { id: string; title: string }) => ({
+          sectionId: sec.id,
+          title: sec.title,
+          words: sectionMap.get(sec.id) ?? [],
+        }));
+        setResults(details);
+        const trDet = aData.transcriptDetections ?? [];
+        setWordsFound(trDet.length);
+        setTotalMentions(trDet.reduce((s: number, d: { total_count: number }) => s + (d.total_count ?? 0), 0));
+        setEventWords((aData.eventWords ?? []).map((w: { word: string }) => ({ word: w.word })));
+      } else {
+        setResults([]);
+        setWordsFound(0);
+        setTotalMentions(0);
+        setEventWords([]);
       }
 
-      // Build mention rate lookup
       if (mentionRes) {
         const mentionJson = await mentionRes.json();
-        const lookup: Record<string, { rate: number; yes: number; total: number }> = {};
+        const lookup: Record<string, { rate: number; yes: number; total: number; events: MentionEventDetail[] }> = {};
         for (const row of mentionJson.rows ?? []) {
           lookup[row.word.toLowerCase()] = {
             rate: row.mentionRate,
             yes: row.yesCount,
             total: row.totalEvents,
+            events: row.events ?? [],
           };
         }
         setMentionData(lookup);
@@ -160,7 +187,7 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
     } finally {
       setLoading(false);
     }
-  }, [transcript.id, transcript.speaker_id]);
+  }, [transcript.id, transcript.speaker_id, analysisId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -402,6 +429,18 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
           </button>
           <div>
             <h2 className="text-sm font-medium text-white">{transcript.title}</h2>
+            {eventTitle && (
+              <div className="flex items-start gap-2 mt-1">
+                <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5 ${
+                  isSelfAnalysis
+                    ? "bg-green-900/30 text-green-400"
+                    : "bg-indigo-900/30 text-indigo-400"
+                }`}>
+                  {isSelfAnalysis ? "original" : "cross"}
+                </span>
+                <span className="text-[11px] text-zinc-400 leading-snug">{eventTitle}</span>
+              </div>
+            )}
             <div className="flex items-center gap-3 text-[10px] text-zinc-500 mt-0.5">
               {transcript.event_date && (
                 <span>{new Date(transcript.event_date).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" })}</span>
@@ -418,15 +457,36 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
             </div>
           </div>
         </div>
-        <button
-          onClick={async () => {
-            if (!confirm("Delete this transcript and all its data?")) return;
-            await onDelete();
-          }}
-          className="text-xs px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded transition-colors"
-        >
-          Delete
-        </button>
+        <div className="flex items-center gap-2">
+          {onReopen && (
+            <button
+              onClick={async () => {
+                const msg = transcript.needs_review
+                  ? "Re-open this transcript to re-classify sections? You'll return to the workflow."
+                  : "Re-open this transcript for edits? You'll return to the workflow.";
+                if (!confirm(msg)) return;
+                await onReopen();
+              }}
+              className={
+                transcript.needs_review
+                  ? "text-xs px-2 py-1 text-amber-300 hover:text-amber-200 bg-amber-900/30 hover:bg-amber-900/50 border border-amber-700/50 rounded transition-colors"
+                  : "text-xs px-2 py-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
+              }
+              title={transcript.needs_review ? transcript.review_reason ?? "Review needed" : "Re-open for edits"}
+            >
+              {transcript.needs_review ? "Review sections" : "Edit sections"}
+            </button>
+          )}
+          <button
+            onClick={async () => {
+              if (!confirm("Delete this transcript and all its data?")) return;
+              await onDelete();
+            }}
+            className="text-xs px-2 py-1 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded transition-colors"
+          >
+            Delete
+          </button>
+        </div>
       </div>
 
       {/* View tabs */}
@@ -669,6 +729,7 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
           kalshiRate: number | null;
           kalshiYes: number | null;
           kalshiTotal: number | null;
+          events: MentionEventDetail[];
         }
 
         // Get all words (from detections + any event words that weren't detected)
@@ -725,11 +786,12 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
             kalshiRate: mention?.rate ?? null,
             kalshiYes: mention?.yes ?? null,
             kalshiTotal: mention?.total ?? null,
+            events: mention?.events ?? [],
           });
         }
 
         // Add unmentioned event words (strikes that were not detected in this transcript)
-        if (transcript.event_id && eventWords.length > 0) {
+        if (eventWords.length > 0) {
           for (const ew of eventWords) {
             if (!detectedWords.has(ew.word) && !rows.find((r) => r.word.toLowerCase() === ew.word.toLowerCase())) {
               const mentionKey = ew.word.toLowerCase();
@@ -747,15 +809,35 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
                 kalshiRate: mention?.rate ?? null,
                 kalshiYes: mention?.yes ?? null,
                 kalshiTotal: mention?.total ?? null,
+                events: mention?.events ?? [],
               });
             }
           }
         }
 
-        // Filter
-        const filtered = wordSearch
-          ? rows.filter((r) => r.word.toLowerCase().includes(wordSearch.toLowerCase()))
-          : rows;
+        // Available categories in the current row set (for the filter chips)
+        const availableCategories = (() => {
+          const set = new Set<string>();
+          let hasNone = false;
+          for (const r of rows) {
+            if (r.dominantCategory) set.add(r.dominantCategory);
+            else hasNone = true;
+          }
+          const list = [...set].sort();
+          if (hasNone) list.push("__none__");
+          return list;
+        })();
+
+        // Filter (text + category)
+        const NONE_KEY = "__none__";
+        const filtered = rows.filter((r) => {
+          if (wordSearch && !r.word.toLowerCase().includes(wordSearch.toLowerCase())) return false;
+          if (wordCategoryFilter.size > 0) {
+            const key = r.dominantCategory ?? NONE_KEY;
+            if (!wordCategoryFilter.has(key)) return false;
+          }
+          return true;
+        });
 
         // Sort
         filtered.sort((a, b) => {
@@ -779,6 +861,41 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
 
         return (
           <div className="space-y-3">
+            {/* Category filter chips */}
+            {availableCategories.length > 0 && (
+              <div className="flex items-center flex-wrap gap-1.5">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wide mr-1">Filter:</span>
+                {availableCategories.map((cat) => {
+                  const isActive = wordCategoryFilter.has(cat);
+                  const label = cat === NONE_KEY ? "No category" : cat;
+                  const activeClass = cat === NONE_KEY
+                    ? "bg-zinc-700 text-zinc-200 border-zinc-500"
+                    : `${getCategoryColor(cat)} border-transparent ring-1 ring-white/20`;
+                  const inactiveClass = "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:border-zinc-700";
+                  return (
+                    <button
+                      key={cat}
+                      onClick={() => toggleWordCategoryFilter(cat)}
+                      className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${isActive ? activeClass : inactiveClass}`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+                {wordCategoryFilter.size > 0 && (
+                  <button
+                    onClick={() => setWordCategoryFilter(new Set())}
+                    className="text-[10px] px-2 py-0.5 text-zinc-400 hover:text-zinc-200 transition-colors ml-1"
+                  >
+                    Clear ×
+                  </button>
+                )}
+                <span className="ml-auto text-[10px] text-zinc-600">
+                  {filtered.length} of {rows.length} words
+                </span>
+              </div>
+            )}
+
             <input
               type="text"
               placeholder="Search words..."
@@ -817,9 +934,21 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((row) => (
-                    <tr key={row.word} className="border-b border-zinc-800/50 hover:bg-zinc-900/30">
-                      <td className="py-2 px-3 text-zinc-300 font-medium">{row.word}</td>
+                  {filtered.map((row) => {
+                    const isExpanded = expandedWord === row.word;
+                    const hasEvents = row.events.length > 0;
+                    return (
+                    <Fragment key={row.word}>
+                    <tr
+                      onClick={() => hasEvents && setExpandedWord(isExpanded ? null : row.word)}
+                      className={`border-b border-zinc-800/50 hover:bg-zinc-900/30 ${hasEvents ? "cursor-pointer" : ""}`}
+                    >
+                      <td className="py-2 px-3 text-zinc-300 font-medium">
+                        {row.word}
+                        {hasEvents && (
+                          <span className="text-zinc-600 text-[10px] ml-2">{isExpanded ? "▲" : "▼"}</span>
+                        )}
+                      </td>
                       <td className="py-2 px-2 text-center">
                         {row.mentioned ? (
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-900/30 text-green-400">YES</span>
@@ -874,7 +1003,59 @@ export function TranscriptResultsView({ transcript, onBack, onDelete }: Transcri
                         {row.kalshiTotal !== null ? `${row.kalshiYes}/${row.kalshiTotal}` : "—"}
                       </td>
                     </tr>
-                  ))}
+                    {isExpanded && hasEvents && (() => {
+                      const filteredEvents = row.events.filter((evt) =>
+                        !eventSearch || (evt.eventTitle ?? "").toLowerCase().includes(eventSearch.toLowerCase())
+                      );
+                      return (
+                      <tr>
+                        <td colSpan={8} className="bg-zinc-900/60 px-3 py-3">
+                          <div className="flex items-center justify-between mb-2 gap-3">
+                            <h4 className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+                              Event-by-Event Results
+                            </h4>
+                            <input
+                              type="text"
+                              value={eventSearch}
+                              onChange={(e) => setEventSearch(e.target.value)}
+                              onClick={(e) => e.stopPropagation()}
+                              placeholder="Search events..."
+                              className="px-2 py-1 bg-zinc-900 border border-zinc-700 rounded text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 w-56"
+                            />
+                            <span className="text-[10px] text-zinc-600 flex-shrink-0">
+                              {filteredEvents.length} of {row.events.length}
+                            </span>
+                          </div>
+                          <div className="space-y-1.5">
+                            {filteredEvents.map((evt) => (
+                              <div
+                                key={evt.eventId + evt.eventTicker}
+                                className="flex items-center justify-between text-xs border border-zinc-800/50 rounded px-3 py-2 bg-zinc-900/40"
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-zinc-300">{evt.eventTitle}</span>
+                                  <span className="text-zinc-600 ml-2">{evt.eventTicker}</span>
+                                </div>
+                                <div className="flex items-center gap-4 ml-4 flex-shrink-0">
+                                  {evt.eventDate && (
+                                    <span className="text-zinc-500">
+                                      {new Date(evt.eventDate).toLocaleDateString()}
+                                    </span>
+                                  )}
+                                  <span className={`font-semibold ${evt.wasMentioned ? "text-green-400" : "text-red-400"}`}>
+                                    {evt.wasMentioned ? "MENTIONED" : "NOT MENTIONED"}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                      );
+                    })()}
+                    </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
               {filtered.length === 0 && (

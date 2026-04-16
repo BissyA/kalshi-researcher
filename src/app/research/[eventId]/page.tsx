@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, use, useMemo } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { useLivePrices } from "@/hooks/useLivePrices";
 import type {
   Event,
@@ -48,6 +48,8 @@ export default function ResearchDashboard({
 }) {
   const { eventId } = use(params);
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
   const modelPreset = searchParams.get("modelPreset") || "sonnet";
   const initialCorpusCategories = searchParams.get("corpusCategories") || searchParams.get("corpusCategory") || "";
 
@@ -69,8 +71,12 @@ export default function ResearchDashboard({
   );
   const [categories, setCategories] = useState<string[]>([]);
 
-  // ── UI state ──
-  const [activeTab, setActiveTab] = useState<TabId>("research");
+  // ── UI state ── (active tab seeded from ?tab= so deep links / new tabs land on the right view)
+  const initialTabParam = searchParams.get("tab");
+  const validTabs: TabId[] = ["research", "compare", "sources", "tradelog"];
+  const [activeTab, setActiveTab] = useState<TabId>(
+    (validTabs.includes(initialTabParam as TabId) ? initialTabParam : "research") as TabId
+  );
   const [sortKey, setSortKey] = useState<SortKey>("edge");
   const [sortAsc, setSortAsc] = useState(false);
   const [researchRunning, setResearchRunning] = useState(false);
@@ -452,7 +458,16 @@ export default function ResearchDashboard({
       {/* Tab Navigation */}
       <TabNavigation
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={(t) => {
+          setActiveTab(t);
+          // Keep URL in sync so Cmd+click / refresh preserves the tab
+          const params = new URLSearchParams(searchParams.toString());
+          if (t === "research") params.delete("tab"); else params.set("tab", t);
+          // Clear Transcript sub-state when switching away
+          if (t !== "compare") { params.delete("setId"); params.delete("view"); }
+          const qs = params.toString();
+          router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+        }}
         tradeCount={trades.length}
         sourceCount={sourceCount}
       />

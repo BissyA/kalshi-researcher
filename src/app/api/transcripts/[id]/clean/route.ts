@@ -70,7 +70,7 @@ export async function POST(
       userMessage: `Target speaker: ${transcript.speaker}\n\nTranscript to clean:\n\n${rawText}`,
       enableWebSearch: false,
       model: "claude-haiku-4-5-20251001",
-      maxTokens: 16000,
+      maxTokens: 48000,
     });
 
     const segments = result.segments;

@@ -26,7 +26,7 @@ const typeColors: Record<string, string> = {
 
 export function SectioningStep({
   transcriptId,
-  speakerId,
+  speakerId: _speakerId, // categories are global — prop kept for caller compat
   sectioningStatus,
   sections,
   segments,
@@ -34,6 +34,7 @@ export function SectioningStep({
   onSegmentsChange,
   onStatusChange,
 }: SectioningStepProps) {
+  void _speakerId;
   const [sectioning, setSectioning] = useState(false);
   const [approving, setApproving] = useState(false);
   const [expandedSection, setExpandedSection] = useState<string | null>(null);
@@ -49,29 +50,27 @@ export function SectioningStep({
   const [creatingCatForSection, setCreatingCatForSection] = useState<string | null>(null);
   const [newCatName, setNewCatName] = useState("");
 
-  // Load pending categories from DB
+  // Load pending categories (global)
   const fetchPendingCategories = useCallback(async () => {
-    if (!speakerId) return;
     try {
-      const res = await fetch(`/api/corpus/speakers/categories?speakerId=${speakerId}&status=pending`);
+      const res = await fetch(`/api/corpus/speakers/categories?status=pending`);
       const data = await res.json();
       setPendingCategories((data.categories ?? []).map((c: { name: string }) => c.name));
     } catch {
       setPendingCategories([]);
     }
-  }, [speakerId]);
+  }, []);
 
-  // Load approved speaker categories (full library)
+  // Load approved categories (global — full library)
   const fetchApprovedCategories = useCallback(async () => {
-    if (!speakerId) return;
     try {
-      const res = await fetch(`/api/corpus/speakers/categories?speakerId=${speakerId}&status=approved`);
+      const res = await fetch(`/api/corpus/speakers/categories?status=approved`);
       const data = await res.json();
       setApprovedSpeakerCats((data.categories ?? []).map((c: { name: string }) => c.name));
     } catch {
       setApprovedSpeakerCats([]);
     }
-  }, [speakerId]);
+  }, []);
 
   useEffect(() => { fetchPendingCategories(); fetchApprovedCategories(); }, [fetchPendingCategories, fetchApprovedCategories]);
   const [elapsed, setElapsed] = useState(0);
@@ -227,14 +226,12 @@ export function SectioningStep({
       });
     }
 
-    // Update speaker_categories row in DB
-    if (speakerId) {
-      await fetch(`/api/corpus/speakers/categories/rename`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ speakerId, oldName, newName: trimmed }),
-      });
-    }
+    // Update canonical category row in DB (global rename)
+    await fetch(`/api/corpus/speakers/categories/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ oldName, newName: trimmed }),
+    });
   }
 
   // All unique category names: from sections + approved speaker categories + pending
@@ -269,12 +266,12 @@ export function SectioningStep({
       return;
     }
 
-    // Create as pending in speaker_categories
+    // Create as pending in global categories
     try {
       const res = await fetch(`/api/corpus/speakers/categories`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ speakerId, name: trimmed, status: "pending" }),
+        body: JSON.stringify({ name: trimmed, status: "pending" }),
       });
       if (!res.ok) {
         const data = await res.json();

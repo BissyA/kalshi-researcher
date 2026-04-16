@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import type { WordScore, PriceData } from "@/types/components";
 import type { MentionHistoryRow, MentionEventDetail } from "@/types/corpus";
 import { edgeColor } from "@/lib/ui-utils";
@@ -60,6 +60,8 @@ export function WordTable({
   const [sortKey, setSortKey] = useState<SortKey>("edge");
   const [sortAsc, setSortAsc] = useState(false);
   const [expandedWord, setExpandedWord] = useState<string | null>(null);
+  const [eventSearch, setEventSearch] = useState("");
+  useEffect(() => { setEventSearch(""); }, [expandedWord]);
   const [catDropdownOpen, setCatDropdownOpen] = useState(false);
   const [speakerDropdownOpen, setSpeakerDropdownOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -397,6 +399,8 @@ export function WordTable({
                   onToggle={() =>
                     setExpandedWord(isExpanded ? null : row.word)
                   }
+                  eventSearch={eventSearch}
+                  onEventSearchChange={setEventSearch}
                 />
               );
             })}
@@ -411,10 +415,14 @@ function WordRowGroup({
   row,
   isExpanded,
   onToggle,
+  eventSearch,
+  onEventSearchChange,
 }: {
   row: WordRow;
   isExpanded: boolean;
   onToggle: () => void;
+  eventSearch: string;
+  onEventSearchChange: (v: string) => void;
 }) {
   return (
     <>
@@ -460,15 +468,32 @@ function WordRowGroup({
           <span className="text-xs">{row.events.length > 0 ? (isExpanded ? "\u25B2" : "\u25BC") : ""}</span>
         </td>
       </tr>
-      {isExpanded && row.events.length > 0 && (
+      {isExpanded && row.events.length > 0 && (() => {
+        const filteredEvents = row.events.filter((evt) =>
+          !eventSearch || (evt.eventTitle ?? "").toLowerCase().includes(eventSearch.toLowerCase())
+        );
+        return (
         <tr>
           <td colSpan={7} className="bg-zinc-900/60 px-4 py-0">
             <div className="py-3">
-              <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                Event-by-Event Results
-              </h4>
+              <div className="flex items-center justify-between mb-2 gap-3">
+                <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+                  Event-by-Event Results
+                </h4>
+                <input
+                  type="text"
+                  value={eventSearch}
+                  onChange={(e) => onEventSearchChange(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  placeholder="Search events..."
+                  className="px-2 py-1 bg-zinc-900 border border-zinc-700 rounded text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 w-56"
+                />
+                <span className="text-[10px] text-zinc-600 flex-shrink-0">
+                  {filteredEvents.length} of {row.events.length}
+                </span>
+              </div>
               <div className="space-y-1.5">
-                {row.events.map((evt) => (
+                {filteredEvents.map((evt) => (
                   <div
                     key={evt.eventId + evt.eventTicker}
                     className="flex items-center justify-between text-xs border border-zinc-800/50 rounded px-3 py-2 bg-zinc-900/40"
@@ -499,7 +524,8 @@ function WordRowGroup({
             </div>
           </td>
         </tr>
-      )}
+        );
+      })()}
     </>
   );
 }

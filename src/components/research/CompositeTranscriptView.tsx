@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState, useEffect } from "react";
 import type { DbTranscriptSection, DbTranscriptSegment } from "@/types/database";
+import type { MentionEventDetail } from "@/types/corpus";
 
 interface SectionWordResult {
   sectionId: string;
@@ -22,7 +23,7 @@ interface CompositeTranscriptViewProps {
   segments: DbTranscriptSegment[];
   wordDetections: SectionWordResult[];
   eventWords: { word: string }[];
-  mentionData: Record<string, { rate: number; yes: number; total: number }>;
+  mentionData: Record<string, { rate: number; yes: number; total: number; events: MentionEventDetail[] }>;
 }
 
 // ── Category color maps (shared with TranscriptResultsView) ──
@@ -94,6 +95,18 @@ export function CompositeTranscriptView({
   const [wordSortKey, setWordSortKey] = useState<"word" | "count" | "sections" | "kalshiRate">("count");
   const [wordSortAsc, setWordSortAsc] = useState(false);
   const [wordSearch, setWordSearch] = useState("");
+  const [wordCategoryFilter, setWordCategoryFilter] = useState<Set<string>>(new Set());
+  const [expandedWord, setExpandedWord] = useState<string | null>(null);
+  const [eventSearch, setEventSearch] = useState("");
+  useEffect(() => { setEventSearch(""); }, [expandedWord]);
+
+  function toggleWordCategoryFilter(name: string) {
+    setWordCategoryFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  }
 
   const hasPins = pinnedCategories.size > 0 || pinnedWords.size > 0;
 
@@ -650,6 +663,7 @@ export function CompositeTranscriptView({
           kalshiYes: number | null;
           kalshiTotal: number | null;
           transcriptCount: number;
+          events: MentionEventDetail[];
         }
 
         const detectedWords = new Map<string, { count: number; sectionIds: Set<string>; transcriptIds: Set<string> }>();
@@ -705,6 +719,7 @@ export function CompositeTranscriptView({
             kalshiYes: mention?.yes ?? null,
             kalshiTotal: mention?.total ?? null,
             transcriptCount: data.transcriptIds.size,
+            events: mention?.events ?? [],
           });
         }
 
@@ -728,14 +743,34 @@ export function CompositeTranscriptView({
                 kalshiYes: mention?.yes ?? null,
                 kalshiTotal: mention?.total ?? null,
                 transcriptCount: 0,
+                events: mention?.events ?? [],
               });
             }
           }
         }
 
-        const filtered = wordSearch
-          ? rows.filter((r) => r.word.toLowerCase().includes(wordSearch.toLowerCase()))
-          : rows;
+        // Available categories in the current row set (for filter chips)
+        const NONE_KEY = "__none__";
+        const availableCategories = (() => {
+          const set = new Set<string>();
+          let hasNone = false;
+          for (const r of rows) {
+            if (r.dominantCategory) set.add(r.dominantCategory);
+            else hasNone = true;
+          }
+          const list = [...set].sort();
+          if (hasNone) list.push(NONE_KEY);
+          return list;
+        })();
+
+        const filtered = rows.filter((r) => {
+          if (wordSearch && !r.word.toLowerCase().includes(wordSearch.toLowerCase())) return false;
+          if (wordCategoryFilter.size > 0) {
+            const key = r.dominantCategory ?? NONE_KEY;
+            if (!wordCategoryFilter.has(key)) return false;
+          }
+          return true;
+        });
 
         filtered.sort((a, b) => {
           let cmp = 0;
@@ -758,6 +793,41 @@ export function CompositeTranscriptView({
 
         return (
           <div className="space-y-3">
+            {/* Category filter chips */}
+            {availableCategories.length > 0 && (
+              <div className="flex items-center flex-wrap gap-1.5">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wide mr-1">Filter:</span>
+                {availableCategories.map((cat) => {
+                  const isActive = wordCategoryFilter.has(cat);
+                  const label = cat === NONE_KEY ? "No category" : cat;
+                  const activeClass = cat === NONE_KEY
+                    ? "bg-zinc-700 text-zinc-200 border-zinc-500"
+                    : `${getCategoryColor(cat)} border-transparent ring-1 ring-white/20`;
+                  const inactiveClass = "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:border-zinc-700";
+                  return (
+                    <button
+                      key={cat}
+                      onClick={() => toggleWordCategoryFilter(cat)}
+                      className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${isActive ? activeClass : inactiveClass}`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+                {wordCategoryFilter.size > 0 && (
+                  <button
+                    onClick={() => setWordCategoryFilter(new Set())}
+                    className="text-[10px] px-2 py-0.5 text-zinc-400 hover:text-zinc-200 transition-colors ml-1"
+                  >
+                    Clear ×
+                  </button>
+                )}
+                <span className="ml-auto text-[10px] text-zinc-600">
+                  {filtered.length} of {rows.length} words
+                </span>
+              </div>
+            )}
+
             <input
               type="text"
               placeholder="Search words..."
@@ -799,9 +869,21 @@ export function CompositeTranscriptView({
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((row) => (
-                    <tr key={row.word} className="border-b border-zinc-800/50 hover:bg-zinc-900/30">
-                      <td className="py-2 px-3 text-zinc-300 font-medium">{row.word}</td>
+                  {filtered.map((row) => {
+                    const isExpanded = expandedWord === row.word;
+                    const hasEvents = row.events.length > 0;
+                    return (
+                    <Fragment key={row.word}>
+                    <tr
+                      onClick={() => hasEvents && setExpandedWord(isExpanded ? null : row.word)}
+                      className={`border-b border-zinc-800/50 hover:bg-zinc-900/30 ${hasEvents ? "cursor-pointer" : ""}`}
+                    >
+                      <td className="py-2 px-3 text-zinc-300 font-medium">
+                        {row.word}
+                        {hasEvents && (
+                          <span className="text-zinc-600 text-[10px] ml-2">{isExpanded ? "▲" : "▼"}</span>
+                        )}
+                      </td>
                       <td className="py-2 px-2 text-center">
                         {row.mentioned ? (
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-900/30 text-green-400">YES</span>
@@ -861,7 +943,59 @@ export function CompositeTranscriptView({
                         {row.kalshiTotal !== null ? `${row.kalshiYes}/${row.kalshiTotal}` : "—"}
                       </td>
                     </tr>
-                  ))}
+                    {isExpanded && hasEvents && (() => {
+                      const filteredEvents = row.events.filter((evt) =>
+                        !eventSearch || (evt.eventTitle ?? "").toLowerCase().includes(eventSearch.toLowerCase())
+                      );
+                      return (
+                      <tr>
+                        <td colSpan={9} className="bg-zinc-900/60 px-3 py-3">
+                          <div className="flex items-center justify-between mb-2 gap-3">
+                            <h4 className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+                              Event-by-Event Results
+                            </h4>
+                            <input
+                              type="text"
+                              value={eventSearch}
+                              onChange={(e) => setEventSearch(e.target.value)}
+                              onClick={(e) => e.stopPropagation()}
+                              placeholder="Search events..."
+                              className="px-2 py-1 bg-zinc-900 border border-zinc-700 rounded text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 w-56"
+                            />
+                            <span className="text-[10px] text-zinc-600 flex-shrink-0">
+                              {filteredEvents.length} of {row.events.length}
+                            </span>
+                          </div>
+                          <div className="space-y-1.5">
+                            {filteredEvents.map((evt) => (
+                              <div
+                                key={evt.eventId + evt.eventTicker}
+                                className="flex items-center justify-between text-xs border border-zinc-800/50 rounded px-3 py-2 bg-zinc-900/40"
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-zinc-300">{evt.eventTitle}</span>
+                                  <span className="text-zinc-600 ml-2">{evt.eventTicker}</span>
+                                </div>
+                                <div className="flex items-center gap-4 ml-4 flex-shrink-0">
+                                  {evt.eventDate && (
+                                    <span className="text-zinc-500">
+                                      {new Date(evt.eventDate).toLocaleDateString()}
+                                    </span>
+                                  )}
+                                  <span className={`font-semibold ${evt.wasMentioned ? "text-green-400" : "text-red-400"}`}>
+                                    {evt.wasMentioned ? "MENTIONED" : "NOT MENTIONED"}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                      );
+                    })()}
+                    </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
               {filtered.length === 0 && (

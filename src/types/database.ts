@@ -111,6 +111,10 @@ export interface DbTranscript {
   completed: boolean;
   updated_at: string | null;
   created_at: string;
+  transcription_status: "downloading" | "transcribing" | "done" | "failed" | null;
+  transcription_error: string | null;
+  transcription_progress: string | null;
+  source_platform: "pdf" | "text" | "youtube" | "x" | null;
 }
 
 export interface DbTranscriptSegment {
